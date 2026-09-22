@@ -7,10 +7,10 @@ const HTML=String.raw`<!doctype html><html><head><meta charset="utf-8"><meta nam
 <section class="login" id="login"><div class="visual"><div class="brandline"><div class="logo">MX</div><div><strong>MX TV</strong><span>by MazenmiX</span></div></div><div class="pitch"><span class="pill">PREMIUM IPTV EXPERIENCE</span><h1>TV, refined.</h1><p>Fast, minimal and designed for every screen — from your phone to a 4K television.</p><div class="devices"><span>📱 Mobile</span><span>📲 Tablet</span><span>💻 Desktop</span><span>📺 Smart TV</span></div></div><div style="color:#667282;font-size:11px">MX TV • Secure Worker edition</div></div><div class="login-side"><div class="card"><h2>Welcome back</h2><div class="sub">Connect your Xtream service and continue watching.</div><div id="histwrap"><div class="histlabel"><span>Recent logins</span><span>saved in this browser</span></div><div class="histrow"><select id="history"><option value="">Choose a previous login…</option></select><button class="small" id="load">Load</button><button class="small" id="del">✕</button></div></div><div class="field"><label><span>Server URL</span><span>Xtream portal</span></label><input id="server" inputmode="url" placeholder="http://example.com:8080"></div><div class="field"><label><span>Username</span><span>required</span></label><input id="user" autocomplete="username" placeholder="Username"></div><div class="field"><label><span>Password</span><span>required</span></label><div class="pass"><input id="pass" type="password" autocomplete="current-password" placeholder="Password"><button class="eye" id="eye">◉</button></div></div><div class="remember"><label><input type="checkbox" id="remember" checked> Remember this login</label><span>secure session</span></div><button class="connect" id="connect">Connect to MX TV</button><div class="err" id="err"></div></div></div></section>
 <div class="app hidden" id="app"><aside class="side" id="side"><div class="sidebrand"><div class="slogo">MX</div><div><strong>MX TV</strong><span>by MazenmiX</span></div></div><nav class="nav"><button class="navbtn active" data-view="home"><span>⌂</span><b>Home</b></button><button class="navbtn" data-view="live"><span>◉</span><b>Live TV</b></button><button class="navbtn" data-view="favorites"><span>★</span><b>Favorites</b></button><button class="navbtn" data-view="movies"><span>▶</span><b>Movies</b></button><button class="navbtn" data-view="series"><span>▣</span><b>Series</b></button><button class="navbtn" data-view="search"><span>⌕</span><b>Search</b></button></nav><div class="sidebottom"><button class="navbtn" data-view="settings"><span>⚙</span><b>Settings</b></button><div class="status"><i></i><span>Connected</span></div></div></aside><main class="main"><header class="top"><div class="topleft"><button class="menu" id="menu">☰</button><div><div class="kicker">MX TV • CONNECTED</div><h1 id="title">Home</h1></div></div><div class="topright"><div class="clock" id="clock"></div><button class="round" id="quick">⌕</button></div></header><section class="content" id="content"></section></main></div>
 <div class="player hidden" id="player"><div class="playerbox"><div class="playtop"><div><div class="kicker">NOW PLAYING</div><strong id="ptitle">Channel</strong></div><button class="round" id="close">✕</button></div><video id="video" controls autoplay playsinline></video><div class="pinfo" id="pinfo"></div></div></div><div class="toast" id="toast"></div>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.18/dist/hls.min.js"></script><script>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.18/dist/hls.min.js"></script><script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script><script>
 const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>[...r.querySelectorAll(s)];
 const KEY='mxtv_profiles_worker',FAV='mxtv_favs_worker';
-let hls=null,filterTimer=null;
+let hls=null,mpegPlayer=null,filterTimer=null;
 const state={
   view:'home',cat:'all',query:'',limit:80,src:null,
   data:{live:[],movies:[],series:[]},
@@ -74,7 +74,7 @@ async function loadAll(){
   state.cats.live=lca.map(x=>x.category_name).filter(Boolean);
   state.cats.movies=vca.map(x=>x.category_name).filter(Boolean);
   state.cats.series=sca.map(x=>x.category_name).filter(Boolean);
-  state.data.live=lsa.map(x=>({id:'l'+x.stream_id,name:x.name||'Channel',cat:lm[String(x.category_id)]||'Live',logo:x.stream_icon||'',url:'/live/'+x.stream_id+'.m3u8'}));
+  state.data.live=lsa.map(x=>({id:'l'+x.stream_id,streamId:x.stream_id,name:x.name||'Channel',cat:lm[String(x.category_id)]||'Live',logo:x.stream_icon||'',url:'/live/'+x.stream_id+'.m3u8'}));
   state.data.movies=vsa.map(x=>({id:'m'+x.stream_id,name:x.name||'Movie',cat:vm[String(x.category_id)]||'Movies',logo:x.stream_icon||'',url:'/movie/'+x.stream_id+'.'+(x.container_extension||'mp4')}));
   state.data.series=ssa.map(x=>({id:'s'+x.series_id,name:x.name||'Series',cat:sm[String(x.category_id)]||'Series',logo:x.cover||'',url:''}))
 }
@@ -198,50 +198,75 @@ function bind(){
   const sw=$('#switch');if(sw)sw.onclick=()=>{$('#app').classList.add('hidden');$('#login').classList.remove('hidden')};
   const lo=$('#logout');if(lo)lo.onclick=async()=>{await fetch('/api/logout',{method:'POST'});state.src=null;state.data={live:[],movies:[],series:[]};state.cats={live:[],movies:[],series:[]};$('#app').classList.add('hidden');$('#login').classList.remove('hidden')}
 }
-function play(x){
+async function play(x){
   if(!x)return;
   if(!x.url){toast('Series episode browser is next.');return}
   $('#ptitle').textContent=x.name;$('#pinfo').textContent=x.cat||'';$('#player').classList.remove('hidden');
   const v=$('#video');
-  if(hls){hls.destroy();hls=null}
-  v.pause();v.removeAttribute('src');v.load();
 
-  const isHls=/\.m3u8($|\?)/i.test(x.url);
+  if(hls){try{hls.destroy()}catch{}hls=null}
+  if(mpegPlayer){try{mpegPlayer.destroy()}catch{}mpegPlayer=null}
+  v.onerror=null;v.pause();v.removeAttribute('src');v.load();
+
+  let mode='hls',playUrl=x.url,diag='';
+  if(x.streamId){
+    try{
+      const p=await req('/api/probe-live?id='+encodeURIComponent(x.streamId));
+      mode=p.mode||'hls';playUrl=p.url||x.url;
+      diag=p.detail||'';
+    }catch(e){
+      diag=e.message||'probe failed';
+    }
+  }
+
   const nativeHls=!!v.canPlayType('application/vnd.apple.mpegurl');
 
-  const fail=()=>{
-    toast('Stream could not start. Trying fallback player…');
-    if(isHls&&window.Hls&&Hls.isSupported()&&!hls){
+  const startMpegTs=()=>{
+    if(window.mpegts&&mpegts.isSupported()){
       try{
-        v.removeAttribute('src');v.load();
-        hls=new Hls({enableWorker:true,lowLatencyMode:false,maxBufferLength:20,backBufferLength:10});
-        hls.on(Hls.Events.ERROR,(ev,data)=>{
-          if(data.fatal)toast('This stream format is not playing on this device.')
-        });
-        hls.loadSource(x.url);hls.attachMedia(v);
-        hls.on(Hls.Events.MANIFEST_PARSED,()=>v.play().catch(()=>{}))
+        mpegPlayer=mpegts.createPlayer({type:'mpegts',isLive:true,url:playUrl},{enableWorker:true,enableStashBuffer:false,stashInitialSize:128});
+        mpegPlayer.attachMediaElement(v);
+        mpegPlayer.load();
+        mpegPlayer.play().catch(()=>{});
+        mpegPlayer.on(mpegts.Events.ERROR,()=>toast('This MPEG-TS stream could not play on this device.'));
+        return true
       }catch{}
     }
+    return false
   };
 
-  v.onerror=fail;
+  if(mode==='ts'){
+    if(!startMpegTs()){
+      v.src=playUrl;
+      v.play().catch(()=>toast('This channel is MPEG-TS and this browser could not decode it.'));
+    }
+    return
+  }
 
-  if(isHls&&nativeHls){
-    v.src=x.url;
+  if(nativeHls){
+    v.src=playUrl;
+    v.onerror=()=>{
+      if(startMpegTs())toast('HLS failed — switched to MPEG-TS fallback.');
+      else toast('Stream failed'+(diag?' · '+diag:''));
+    };
     v.play().catch(()=>{});
-  }else if(isHls&&window.Hls&&Hls.isSupported()){
+  }else if(window.Hls&&Hls.isSupported()){
     hls=new Hls({enableWorker:true,lowLatencyMode:false,maxBufferLength:20,backBufferLength:10});
     hls.on(Hls.Events.ERROR,(ev,data)=>{
-      if(data.fatal)toast('This stream format is not playing on this device.')
+      if(data.fatal){
+        try{hls.destroy()}catch{}hls=null;
+        if(startMpegTs())toast('HLS failed — switched to MPEG-TS fallback.');
+        else toast('Stream failed'+(diag?' · '+diag:''));
+      }
     });
-    hls.loadSource(x.url);hls.attachMedia(v);
+    hls.loadSource(playUrl);hls.attachMedia(v);
     hls.on(Hls.Events.MANIFEST_PARSED,()=>v.play().catch(()=>{}))
   }else{
-    v.src=x.url;
-    v.play().catch(()=>{})
+    v.src=playUrl;
+    v.play().catch(()=>toast('This stream format is not supported by this browser.'))
   }
 }
-$('#close').onclick=()=>{$('#player').classList.add('hidden');$('#video').pause();if(hls){hls.destroy();hls=null}};
+$('#close').onclick=()=>{$('#player').classList.add('hidden');$('#video').pause();if(hls){try{hls.destroy()}catch{}hls=null}if(mpegPlayer){try{mpegPlayer.destroy()}catch{}mpegPlayer=null}};
 $('#player').onclick=e=>{if(e.target.id==='player')$('#close').click()};
 
 async function boot(){
@@ -280,15 +305,58 @@ async function media(req,env,target){
   h.set('user-agent','Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148');
   const up=await fetch(target,{headers:h,redirect:'follow'});
   const ct=(up.headers.get('content-type')||'').toLowerCase(),final=up.url||target;
-  if(!up.ok)return new Response(up.body,{status:up.status,headers:{'content-type':up.headers.get('content-type')||'text/plain','cache-control':'no-store'}});
-  if(ct.includes('mpegurl')||new URL(final).pathname.toLowerCase().endsWith('.m3u8')){
-    const tx=await up.text();
-    return new Response(await rewrite(env,tx,final),{status:up.status,headers:{'content-type':'application/vnd.apple.mpegurl; charset=utf-8','cache-control':'no-store'}});
+
+  if(!up.ok){
+    return new Response(up.body,{status:up.status,headers:{'content-type':up.headers.get('content-type')||'text/plain','cache-control':'no-store'}})
   }
+
+  const isPlaylist=ct.includes('mpegurl')||ct.includes('vnd.apple')||ct.includes('x-mpegurl')||ct.startsWith('text/');
+  if(isPlaylist){
+    const tx=await up.text();
+    return new Response(await rewrite(env,tx,final),{
+      status:up.status,
+      headers:{'content-type':'application/vnd.apple.mpegurl; charset=utf-8','cache-control':'no-store'}
+    })
+  }
+
   const oh=new Headers();
-  for(const k of ['content-type','content-length','content-range','accept-ranges','cache-control']){const v=up.headers.get(k);if(v)oh.set(k,v)}
+  for(const k of ['content-type','content-length','content-range','accept-ranges','cache-control']){
+    const v=up.headers.get(k);if(v)oh.set(k,v)
+  }
   if(!oh.has('content-type'))oh.set('content-type','video/mp2t');
   return new Response(up.body,{status:up.status,headers:oh})
 }
 
-export default{async fetch(req,env){const u=new URL(req.url),p=u.pathname;if(p==='/'||p==='/index.html')return new Response(HTML,{headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store'}});if(p==='/api/login'&&req.method==='POST'){let b;try{b=await req.json()}catch{return json({error:'Invalid request'},400)}const server=clean(b.server),username=String(b.username||'').trim(),password=String(b.password||''),remember=!!b.remember;if(!server||!username||!password)return json({error:'Server, username and password are required.'},400);try{safe(server);const d=await getj(apiurl({server,username,password}));if(!d?.user_info||String(d.user_info.auth??'0')!=='1')return json({error:'Xtream username or password is not accepted.'},401);const payload={server,username,password,user_info:{username:d.user_info.username||username,status:d.user_info.status||'',exp_date:d.user_info.exp_date||''},exp:Date.now()+(remember?30:0.5)*86400000};const tok=await makeSession(env,payload);let c='mx_session='+tok+'; Path=/; HttpOnly; Secure; SameSite=Lax';if(remember)c+='; Max-Age=2592000';return json({ok:true,user_info:payload.user_info},200,{'set-cookie':c})}catch(e){return json({error:e.name==='AbortError'?'Xtream server timed out.':e.message},502)}}if(p==='/api/logout'&&req.method==='POST')return json({ok:true},200,{'set-cookie':'mx_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'});const s=await session(req,env);if(p==='/api/session'){if(!s)return json({ok:false},401);return json({ok:true,server:s.server,username:s.username,user_info:s.user_info})}if(!s)return json({error:'Session expired. Please login again.'},401);if(p==='/api/action'){const a=u.searchParams.get('action')||'',allow=new Set(['get_live_categories','get_live_streams','get_vod_categories','get_vod_streams','get_series_categories','get_series']);if(!allow.has(a))return json({error:'Unsupported action'},400);try{return json(await getj(apiurl(s,a)))}catch(e){return json({error:e.message},502)}}let m=p.match(/^\/live\/(\d+)\.m3u8$/);if(m)return media(req,env,clean(s.server)+'/live/'+encodeURIComponent(s.username)+'/'+encodeURIComponent(s.password)+'/'+m[1]+'.m3u8');m=p.match(/^\/movie\/(\d+)\.([a-zA-Z0-9]{2,6})$/);if(m)return media(req,env,clean(s.server)+'/movie/'+encodeURIComponent(s.username)+'/'+encodeURIComponent(s.password)+'/'+m[1]+'.'+m[2]);if(p==='/proxy'){const target=u.searchParams.get('u')||'',sg=u.searchParams.get('s')||'';if(!target||!sg||!(await verify(env,target,sg)))return new Response('Invalid stream token',{status:403});return media(req,env,target)}return new Response('Not found',{status:404})}};
+async function probeOne(target){
+  safe(target);
+  const ctl=new AbortController();
+  const timer=setTimeout(()=>ctl.abort(),8000);
+  try{
+    const r=await fetch(target,{
+      redirect:'follow',
+      signal:ctl.signal,
+      headers:{
+        'accept':'*/*',
+        'user-agent':'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148'
+      }
+    });
+    const ct=(r.headers.get('content-type')||'').toLowerCase();
+    try{await r.body?.cancel()}catch{}
+    return {ok:r.ok,status:r.status,contentType:ct}
+  }finally{clearTimeout(timer)}
+}
+
+export default{async fetch(req,env){const u=new URL(req.url),p=u.pathname;if(p==='/'||p==='/index.html')return new Response(HTML,{headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store'}});if(p==='/api/login'&&req.method==='POST'){let b;try{b=await req.json()}catch{return json({error:'Invalid request'},400)}const server=clean(b.server),username=String(b.username||'').trim(),password=String(b.password||''),remember=!!b.remember;if(!server||!username||!password)return json({error:'Server, username and password are required.'},400);try{safe(server);const d=await getj(apiurl({server,username,password}));if(!d?.user_info||String(d.user_info.auth??'0')!=='1')return json({error:'Xtream username or password is not accepted.'},401);const payload={server,username,password,user_info:{username:d.user_info.username||username,status:d.user_info.status||'',exp_date:d.user_info.exp_date||''},exp:Date.now()+(remember?30:0.5)*86400000};const tok=await makeSession(env,payload);let c='mx_session='+tok+'; Path=/; HttpOnly; Secure; SameSite=Lax';if(remember)c+='; Max-Age=2592000';return json({ok:true,user_info:payload.user_info},200,{'set-cookie':c})}catch(e){return json({error:e.name==='AbortError'?'Xtream server timed out.':e.message},502)}}if(p==='/api/logout'&&req.method==='POST')return json({ok:true},200,{'set-cookie':'mx_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'});const s=await session(req,env);if(p==='/api/session'){if(!s)return json({ok:false},401);return json({ok:true,server:s.server,username:s.username,user_info:s.user_info})}if(!s)return json({error:'Session expired. Please login again.'},401);if(p==='/api/action'){const a=u.searchParams.get('action')||'',allow=new Set(['get_live_categories','get_live_streams','get_vod_categories','get_vod_streams','get_series_categories','get_series']);if(!allow.has(a))return json({error:'Unsupported action'},400);try{return json(await getj(apiurl(s,a)))}catch(e){return json({error:e.message},502)}}if(p==='/api/probe-live'){
+    const id=u.searchParams.get('id')||'';
+    if(!/^\d+$/.test(id))return json({error:'Invalid stream id'},400);
+    const base=clean(s.server)+'/live/'+encodeURIComponent(s.username)+'/'+encodeURIComponent(s.password)+'/'+id;
+    let hlsInfo=null,tsInfo=null;
+    try{hlsInfo=await probeOne(base+'.m3u8')}catch(e){hlsInfo={ok:false,status:0,contentType:'',error:e.name==='AbortError'?'timeout':e.message}}
+    const hct=(hlsInfo?.contentType||'').toLowerCase();
+    const hlsLooksPlaylist=!!(hlsInfo?.ok&&(hct.includes('mpegurl')||hct.includes('vnd.apple')||hct.includes('x-mpegurl')||hct.startsWith('text/')));
+    if(hlsLooksPlaylist)return json({mode:'hls',url:'/live/'+id+'.m3u8',detail:'HLS '+hlsInfo.status+' '+hct});
+    try{tsInfo=await probeOne(base+'.ts')}catch(e){tsInfo={ok:false,status:0,contentType:'',error:e.name==='AbortError'?'timeout':e.message}}
+    if(tsInfo?.ok)return json({mode:'ts',url:'/live/'+id+'.ts',detail:'TS '+tsInfo.status+' '+(tsInfo.contentType||'')});
+    if(hlsInfo?.ok)return json({mode:'ts',url:'/live/'+id+'.m3u8',detail:'binary '+hlsInfo.status+' '+hct});
+    return json({error:'Upstream stream unavailable. HLS '+(hlsInfo?.status||0)+' / TS '+(tsInfo?.status||0)},502)
+  }let m=p.match(/^\/live\/(\d+)\.m3u8$/);if(m)return media(req,env,clean(s.server)+'/live/'+encodeURIComponent(s.username)+'/'+encodeURIComponent(s.password)+'/'+m[1]+'.m3u8');m=p.match(/^\/live\/(\d+)\.ts$/);if(m)return media(req,env,clean(s.server)+'/live/'+encodeURIComponent(s.username)+'/'+encodeURIComponent(s.password)+'/'+m[1]+'.ts');m=p.match(/^\/movie\/(\d+)\.([a-zA-Z0-9]{2,6})$/);if(m)return media(req,env,clean(s.server)+'/movie/'+encodeURIComponent(s.username)+'/'+encodeURIComponent(s.password)+'/'+m[1]+'.'+m[2]);if(p==='/proxy'){const target=u.searchParams.get('u')||'',sg=u.searchParams.get('s')||'';if(!target||!sg||!(await verify(env,target,sg)))return new Response('Invalid stream token',{status:403});return media(req,env,target)}return new Response('Not found',{status:404})}};
