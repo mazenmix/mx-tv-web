@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "mx-tv-web",
-  "main": "src/index.js",
+  "name": "mxtv",
+  "pages_build_output_dir": "./public",
   "compatibility_date": "2026-09-22"
 }
