@@ -267,10 +267,11 @@ async function play(x){
   const formats=(state.src?.user_info?.allowed_output_formats||[]).map(v=>String(v).toLowerCase());
   const hasHls=formats.length===0||formats.includes('m3u8')||formats.includes('hls');
   const hasTs=formats.length===0||formats.includes('ts')||formats.includes('mpegts');
-  const hlsUrl=x.streamId?('/live/'+x.streamId+'.m3u8?force=hls'):x.url;
+  const origin=window.location.origin;
+  const hlsUrl=x.streamId?(origin+'/live/'+x.streamId+'.m3u8?force=hls'):x.url;
   const tsUrls=x.streamId?[
-    '/live/'+x.streamId+'.ts?force=ts',
-    '/live/'+x.streamId+'.m3u8?force=ts'
+    origin+'/live/'+x.streamId+'.ts?force=ts',
+    origin+'/live/'+x.streamId+'.m3u8?force=ts'
   ]:[x.url];
   const nativeHls=!!v.canPlayType('application/vnd.apple.mpegurl');
 
@@ -442,14 +443,63 @@ async function getj(url){const c=new AbortController(),t=setTimeout(()=>c.abort(
 function apiurl(s,a='',params={}){const u=new URL(clean(s.server)+'/player_api.php');u.searchParams.set('username',s.username);u.searchParams.set('password',s.password);if(a)u.searchParams.set('action',a);for(const [k,v] of Object.entries(params)){if(v!==undefined&&v!==null&&v!=='')u.searchParams.set(k,String(v))}return u.toString()}
 async function proxysign(env,url){return sign(env,url)}
 async function rewrite(env,text,base){const out=[];for(let line of text.split(/\r?\n/)){if(!line){out.push(line);continue}if(line.startsWith('#')){const m=line.match(/URI="([^"]+)"/);if(m){const abs=new URL(m[1],base).toString(),sg=await proxysign(env,abs);line=line.replace(m[1],'/proxy?u='+encodeURIComponent(abs)+'&s='+encodeURIComponent(sg))}out.push(line)}else{const abs=new URL(line,base).toString(),sg=await proxysign(env,abs);out.push('/proxy?u='+encodeURIComponent(abs)+'&s='+encodeURIComponent(sg))}}return out.join('\n')}
+function upstreamCandidates(raw){
+  const out=[];
+  const push=(v)=>{if(v&&!out.includes(v))out.push(v)};
+  let u;try{u=new URL(raw)}catch{return [raw]}
+  push(u.toString());
+
+  // Same host over HTTPS is often accepted even when the supplied portal URL is HTTP.
+  if(u.protocol==='http:'){
+    const h=new URL(u.toString());h.protocol='https:';push(h.toString());
+  }
+
+  // This provider publishes interchangeable cf / pro / tv host aliases.
+  // If one edge rejects media (e.g. custom HTTP 456), try the siblings transparently.
+  const host=u.hostname.toLowerCase();
+  const m=host.match(/^(cf|pro|tv)\.(business-cdn-8k\.com)$/);
+  if(m){
+    for(const sub of ['cf','pro','tv']){
+      for(const proto of ['http:','https:']){
+        const x=new URL(u.toString());
+        x.hostname=sub+'.'+m[2];
+        x.protocol=proto;
+        push(x.toString());
+      }
+    }
+  }
+  return out
+}
+
+async function fetchUpstream(raw,options={}){
+  const attempts=[];
+  let last=null;
+  for(const candidate of upstreamCandidates(raw)){
+    try{
+      const r=await fetch(candidate,options);
+      attempts.push({url:candidate,status:r.status,contentType:r.headers.get('content-type')||''});
+      if(r.ok)return {response:r,url:candidate,attempts};
+      last=r;
+      try{await r.body?.cancel()}catch{}
+      // Retry alternate edge/scheme for custom upstream denial and common access errors.
+      if(![401,403,404,405,406,409,429,456,500,502,503,504,509].includes(r.status))break;
+    }catch(e){
+      attempts.push({url:candidate,status:0,error:e&&e.message?e.message:String(e)});
+    }
+  }
+  return {response:last,url:attempts.at(-1)?.url||raw,attempts}
+}
+
 async function media(req,env,target,force='auto'){
   safe(target);
   const h=new Headers();
   const range=req.headers.get('range');if(range)h.set('range',range);
   h.set('accept','*/*');
   h.set('user-agent','Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148');
-  const up=await fetch(target,{headers:h,redirect:'follow'});
-  const ct=(up.headers.get('content-type')||'').toLowerCase(),final=up.url||target;
+  const fetched=await fetchUpstream(target,{headers:h,redirect:'follow'});
+  const up=fetched.response;
+  if(!up)return new Response('All upstream stream endpoints failed',{status:502,headers:{'content-type':'text/plain','cache-control':'no-store'}});
+  const ct=(up.headers.get('content-type')||'').toLowerCase(),final=up.url||fetched.url||target;
 
   if(!up.ok){
     return new Response(up.body,{status:up.status,headers:{'content-type':up.headers.get('content-type')||'text/plain','cache-control':'no-store'}})
@@ -477,53 +527,64 @@ async function media(req,env,target,force='auto'){
 
 async function probeOne(target){
   safe(target);
-  const ctl=new AbortController();
-  const timer=setTimeout(()=>ctl.abort(),8000);
-  try{
-    const r=await fetch(target,{
-      redirect:'follow',
-      signal:ctl.signal,
-      headers:{
-        'accept':'*/*',
-        'user-agent':'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148'
-      }
-    });
-    const ct=(r.headers.get('content-type')||'').toLowerCase();
-    if(!r.ok){
-      try{await r.body?.cancel()}catch{}
-      return {ok:false,status:r.status,contentType:ct,kind:'error'}
-    }
-
-    let bytes=new Uint8Array();
+  const attempts=[];
+  for(const candidate of upstreamCandidates(target)){
+    const ctl=new AbortController();
+    const timer=setTimeout(()=>ctl.abort(),8000);
     try{
-      const reader=r.body?.getReader();
-      if(reader){
-        const chunks=[];let total=0;
-        while(total<4096){
-          const {done,value}=await reader.read();
-          if(done)break;
-          if(value){chunks.push(value);total+=value.length}
-          if(total>=4096)break
+      const r=await fetch(candidate,{
+        redirect:'follow',
+        signal:ctl.signal,
+        headers:{
+          'accept':'*/*',
+          'user-agent':'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148'
         }
-        try{await reader.cancel()}catch{}
-        bytes=new Uint8Array(total);
-        let off=0;for(const ch of chunks){bytes.set(ch,off);off+=ch.length}
+      });
+      const ct=(r.headers.get('content-type')||'').toLowerCase();
+      if(!r.ok){
+        attempts.push({url:candidate,status:r.status,contentType:ct});
+        try{await r.body?.cancel()}catch{}
+        clearTimeout(timer);
+        continue
       }
-    }catch{}
 
-    let prefix='';
-    try{prefix=new TextDecoder().decode(bytes.slice(0,512)).trimStart()}catch{}
-    const looksHls=prefix.startsWith('#EXTM3U');
-    const looksTs=bytes.length>376 && bytes[0]===0x47 && bytes[188]===0x47 && bytes[376]===0x47;
+      let bytes=new Uint8Array();
+      try{
+        const reader=r.body?.getReader();
+        if(reader){
+          const chunks=[];let total=0;
+          while(total<4096){
+            const {done,value}=await reader.read();
+            if(done)break;
+            if(value){chunks.push(value);total+=value.length}
+            if(total>=4096)break
+          }
+          try{await reader.cancel()}catch{}
+          bytes=new Uint8Array(total);
+          let off=0;for(const ch of chunks){bytes.set(ch,off);off+=ch.length}
+        }
+      }catch{}
 
-    let kind='unknown';
-    if(looksHls)kind='hls';
-    else if(looksTs)kind='ts';
-    else if(ct.includes('mpegurl')||ct.includes('vnd.apple')||ct.includes('x-mpegurl'))kind='hls';
-    else if(ct.includes('mp2t')||ct.includes('mpegts'))kind='ts';
+      let prefix='';
+      try{prefix=new TextDecoder().decode(bytes.slice(0,512)).trimStart()}catch{}
+      const looksHls=prefix.startsWith('#EXTM3U');
+      const looksTs=bytes.length>376&&bytes[0]===0x47&&bytes[188]===0x47&&bytes[376]===0x47;
+      let kind='unknown';
+      if(looksHls)kind='hls';
+      else if(looksTs)kind='ts';
+      else if(ct.includes('mpegurl')||ct.includes('vnd.apple')||ct.includes('x-mpegurl'))kind='hls';
+      else if(ct.includes('mp2t')||ct.includes('mpegts'))kind='ts';
 
-    return {ok:true,status:r.status,contentType:ct,kind,prefix:prefix.slice(0,32)}
-  }finally{clearTimeout(timer)}
+      clearTimeout(timer);
+      return {ok:true,status:r.status,contentType:ct,kind,prefix:prefix.slice(0,32),url:candidate,attempts}
+    }catch(e){
+      attempts.push({url:candidate,status:0,error:e.name==='AbortError'?'timeout':(e&&e.message?e.message:String(e))});
+    }finally{
+      clearTimeout(timer)
+    }
+  }
+  const last=attempts.at(-1)||{};
+  return {ok:false,status:last.status||0,contentType:last.contentType||'',kind:'error',attempts}
 }
 
 export default{async fetch(req,env){const u=new URL(req.url),p=u.pathname;if(p==='/'||p==='/index.html')return new Response(HTML,{headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store'}});if(p==='/api/login'&&req.method==='POST'){let b;try{b=await req.json()}catch{return json({error:'Invalid request'},400)}const server=clean(b.server),username=String(b.username||'').trim(),password=String(b.password||''),remember=!!b.remember;if(!server||!username||!password)return json({error:'Server, username and password are required.'},400);try{safe(server);const d=await getj(apiurl({server,username,password}));if(!d?.user_info||String(d.user_info.auth??'0')!=='1')return json({error:'Xtream username or password is not accepted.'},401);const payload={server,username,password,user_info:{username:d.user_info.username||username,status:d.user_info.status||'',exp_date:d.user_info.exp_date||'',allowed_output_formats:Array.isArray(d.user_info.allowed_output_formats)?d.user_info.allowed_output_formats:[],max_connections:d.user_info.max_connections||'',active_cons:d.user_info.active_cons||''},exp:Date.now()+(remember?30:0.5)*86400000};const tok=await makeSession(env,payload);let c='mx_session='+tok+'; Path=/; HttpOnly; Secure; SameSite=Lax';if(remember)c+='; Max-Age=2592000';return json({ok:true,user_info:payload.user_info},200,{'set-cookie':c})}catch(e){return json({error:e.name==='AbortError'?'Xtream server timed out.':e.message},502)}}if(p==='/api/logout'&&req.method==='POST')return json({ok:true},200,{'set-cookie':'mx_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'});const s=await session(req,env);if(p==='/api/session'){if(!s)return json({ok:false},401);return json({ok:true,server:s.server,username:s.username,user_info:s.user_info})}if(!s)return json({error:'Session expired. Please login again.'},401);if(p==='/api/action'){const a=u.searchParams.get('action')||'',allow=new Set(['get_live_categories','get_live_streams','get_vod_categories','get_vod_streams','get_series_categories','get_series','get_series_info','get_short_epg','get_simple_data_table']);if(!allow.has(a))return json({error:'Unsupported action'},400);const params={};for(const k of ['category_id','series_id','stream_id','epg_limit']){const v=u.searchParams.get(k);if(v!==null&&v!=='')params[k]=v}try{return json(await getj(apiurl(s,a,params)))}catch(e){return json({error:e.message},502)}}if(p==='/api/debug-live'){
