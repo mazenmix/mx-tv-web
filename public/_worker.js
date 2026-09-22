@@ -453,31 +453,10 @@ function apiurl(s,a='',params={}){const u=new URL(clean(s.server)+'/player_api.p
 async function proxysign(env,url){return sign(env,url)}
 async function rewrite(env,text,base){const out=[];for(let line of text.split(/\r?\n/)){if(!line){out.push(line);continue}if(line.startsWith('#')){const m=line.match(/URI="([^"]+)"/);if(m){const abs=new URL(m[1],base).toString(),sg=await proxysign(env,abs);line=line.replace(m[1],'/proxy?u='+encodeURIComponent(abs)+'&s='+encodeURIComponent(sg))}out.push(line)}else{const abs=new URL(line,base).toString(),sg=await proxysign(env,abs);out.push('/proxy?u='+encodeURIComponent(abs)+'&s='+encodeURIComponent(sg))}}return out.join('\n')}
 function upstreamCandidates(raw){
-  const out=[];
-  const push=(v)=>{if(v&&!out.includes(v))out.push(v)};
-  let u;try{u=new URL(raw)}catch{return [raw]}
-  push(u.toString());
-
-  // Same host over HTTPS is often accepted even when the supplied portal URL is HTTP.
-  if(u.protocol==='http:'){
-    const h=new URL(u.toString());h.protocol='https:';push(h.toString());
-  }
-
-  // This provider publishes interchangeable cf / pro / tv host aliases.
-  // If one edge rejects media (e.g. custom HTTP 456), try the siblings transparently.
-  const host=u.hostname.toLowerCase();
-  const m=host.match(/^(cf|pro|tv)\.(business-cdn-8k\.com)$/);
-  if(m){
-    for(const sub of ['cf','pro','tv']){
-      for(const proto of ['http:','https:']){
-        const x=new URL(u.toString());
-        x.hostname=sub+'.'+m[2];
-        x.protocol=proto;
-        push(x.toString());
-      }
-    }
-  }
-  return out
+  // Use only the exact Xtream host supplied by the user.
+  // Multiple alias/scheme retries can be counted as parallel IPTV connections
+  // and can trigger provider-side 456 / max-connection / IP-lock protection.
+  try{return [new URL(raw).toString()]}catch{return [raw]}
 }
 
 async function fetchUpstream(raw,options={}){
@@ -504,7 +483,7 @@ async function media(req,env,target,force='auto'){
   const h=new Headers();
   const range=req.headers.get('range');if(range)h.set('range',range);
   h.set('accept','*/*');
-  h.set('user-agent','Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148');
+  h.set('user-agent','VLC/3.0.20 LibVLC/3.0.20');
   const fetched=await fetchUpstream(target,{headers:h,redirect:'follow'});
   const up=fetched.response;
   if(!up){
@@ -555,7 +534,7 @@ async function probeOne(target){
         signal:ctl.signal,
         headers:{
           'accept':'*/*',
-          'user-agent':'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148'
+          'user-agent':'VLC/3.0.20 LibVLC/3.0.20'
         }
       });
       const ct=(r.headers.get('content-type')||'').toLowerCase();
