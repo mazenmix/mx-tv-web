@@ -321,6 +321,15 @@ async function play(x){
               const message='TS playback failed · '+parts.filter(Boolean).map(String).join(' · ');
               setInfo(message);
               toast(message);
+              if(x.streamId){
+                req('/api/debug-live?id='+encodeURIComponent(x.streamId)).then(d=>{
+                  const h=d.hls||{},t=d.ts||{};
+                  const hs=h.status||0,ts=t.status||0;
+                  const detail='Upstream HLS '+hs+' / TS '+ts;
+                  setInfo(message+' · '+detail);
+                  if(hs===456||ts===456)toast('Provider rejected the relay request with HTTP 456.');
+                }).catch(()=>{})
+              }
             }
           };
 
@@ -473,21 +482,21 @@ function upstreamCandidates(raw){
 
 async function fetchUpstream(raw,options={}){
   const attempts=[];
-  let last=null;
   for(const candidate of upstreamCandidates(raw)){
     try{
       const r=await fetch(candidate,options);
-      attempts.push({url:candidate,status:r.status,contentType:r.headers.get('content-type')||''});
-      if(r.ok)return {response:r,url:candidate,attempts};
-      last=r;
+      const info={url:candidate,status:r.status,contentType:r.headers.get('content-type')||''};
+      attempts.push(info);
+      if(r.ok)return {response:r,url:candidate,attempts,last:info};
       try{await r.body?.cancel()}catch{}
-      // Retry alternate edge/scheme for custom upstream denial and common access errors.
-      if(![401,403,404,405,406,409,429,456,500,502,503,504,509].includes(r.status))break;
+      if(![401,403,404,405,406,409,429,456,500,502,503,504,509].includes(r.status)){
+        return {response:null,url:candidate,attempts,last:info}
+      }
     }catch(e){
       attempts.push({url:candidate,status:0,error:e&&e.message?e.message:String(e)});
     }
   }
-  return {response:last,url:attempts.at(-1)?.url||raw,attempts}
+  return {response:null,url:attempts.at(-1)?.url||raw,attempts,last:attempts.at(-1)||null}
 }
 
 async function media(req,env,target,force='auto'){
@@ -498,12 +507,21 @@ async function media(req,env,target,force='auto'){
   h.set('user-agent','Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148');
   const fetched=await fetchUpstream(target,{headers:h,redirect:'follow'});
   const up=fetched.response;
-  if(!up)return new Response('All upstream stream endpoints failed',{status:502,headers:{'content-type':'text/plain','cache-control':'no-store'}});
-  const ct=(up.headers.get('content-type')||'').toLowerCase(),final=up.url||fetched.url||target;
-
-  if(!up.ok){
-    return new Response(up.body,{status:up.status,headers:{'content-type':up.headers.get('content-type')||'text/plain','cache-control':'no-store'}})
+  if(!up){
+    const last=fetched.last||{};
+    const statuses=fetched.attempts.map(a=>(a.status||0)+'@'+(()=>{try{return new URL(a.url).hostname}catch{return 'upstream'}})()).join(', ');
+    const upstreamStatus=Number(last.status)||0;
+    const body='Upstream stream rejected. Last status '+upstreamStatus+'. Attempts: '+statuses;
+    return new Response(body,{
+      status:502,
+      headers:{
+        'content-type':'text/plain; charset=utf-8',
+        'cache-control':'no-store',
+        'x-mxtv-upstream-status':String(upstreamStatus)
+      }
+    })
   }
+  const ct=(up.headers.get('content-type')||'').toLowerCase(),final=up.url||fetched.url||target;
 
   const treatAsPlaylist = force==='hls' || (force==='auto' && (ct.includes('mpegurl')||ct.includes('vnd.apple')||ct.includes('x-mpegurl')||ct.startsWith('text/')));
   if(treatAsPlaylist){
