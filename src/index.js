@@ -290,7 +290,7 @@ async function getj(url){const c=new AbortController(),t=setTimeout(()=>c.abort(
 function apiurl(s,a='',params={}){const u=new URL(clean(s.server)+'/player_api.php');u.searchParams.set('username',s.username);u.searchParams.set('password',s.password);if(a)u.searchParams.set('action',a);for(const [k,v] of Object.entries(params)){if(v!==undefined&&v!==null&&v!=='')u.searchParams.set(k,String(v))}return u.toString()}
 async function proxysign(env,url){return sign(env,url)}
 async function rewrite(env,text,base){const out=[];for(let line of text.split(/\r?\n/)){if(!line){out.push(line);continue}if(line.startsWith('#')){const m=line.match(/URI="([^"]+)"/);if(m){const abs=new URL(m[1],base).toString(),sg=await proxysign(env,abs);line=line.replace(m[1],'/proxy?u='+encodeURIComponent(abs)+'&s='+encodeURIComponent(sg))}out.push(line)}else{const abs=new URL(line,base).toString(),sg=await proxysign(env,abs);out.push('/proxy?u='+encodeURIComponent(abs)+'&s='+encodeURIComponent(sg))}}return out.join('\n')}
-async function media(req,env,target){
+async function media(req,env,target,force='auto'){
   safe(target);
   const h=new Headers();
   const range=req.headers.get('range');if(range)h.set('range',range);
@@ -303,9 +303,12 @@ async function media(req,env,target){
     return new Response(up.body,{status:up.status,headers:{'content-type':up.headers.get('content-type')||'text/plain','cache-control':'no-store'}})
   }
 
-  const isPlaylist=ct.includes('mpegurl')||ct.includes('vnd.apple')||ct.includes('x-mpegurl')||ct.startsWith('text/');
-  if(isPlaylist){
+  const treatAsPlaylist = force==='hls' || (force==='auto' && (ct.includes('mpegurl')||ct.includes('vnd.apple')||ct.includes('x-mpegurl')||ct.startsWith('text/')));
+  if(treatAsPlaylist){
     const tx=await up.text();
+    if(!tx.trimStart().startsWith('#EXTM3U')){
+      return new Response('Upstream did not return an HLS playlist',{status:502,headers:{'content-type':'text/plain','cache-control':'no-store'}})
+    }
     return new Response(await rewrite(env,tx,final),{
       status:up.status,
       headers:{'content-type':'application/vnd.apple.mpegurl; charset=utf-8','cache-control':'no-store'}
@@ -316,7 +319,7 @@ async function media(req,env,target){
   for(const k of ['content-type','content-length','content-range','accept-ranges','cache-control']){
     const v=up.headers.get(k);if(v)oh.set(k,v)
   }
-  if(!oh.has('content-type'))oh.set('content-type','video/mp2t');
+  if(force==='ts'||!oh.has('content-type'))oh.set('content-type','video/mp2t');
   return new Response(up.body,{status:up.status,headers:oh})
 }
 
@@ -334,8 +337,40 @@ async function probeOne(target){
       }
     });
     const ct=(r.headers.get('content-type')||'').toLowerCase();
-    try{await r.body?.cancel()}catch{}
-    return {ok:r.ok,status:r.status,contentType:ct}
+    if(!r.ok){
+      try{await r.body?.cancel()}catch{}
+      return {ok:false,status:r.status,contentType:ct,kind:'error'}
+    }
+
+    let bytes=new Uint8Array();
+    try{
+      const reader=r.body?.getReader();
+      if(reader){
+        const chunks=[];let total=0;
+        while(total<4096){
+          const {done,value}=await reader.read();
+          if(done)break;
+          if(value){chunks.push(value);total+=value.length}
+          if(total>=4096)break
+        }
+        try{await reader.cancel()}catch{}
+        bytes=new Uint8Array(total);
+        let off=0;for(const ch of chunks){bytes.set(ch,off);off+=ch.length}
+      }
+    }catch{}
+
+    let prefix='';
+    try{prefix=new TextDecoder().decode(bytes.slice(0,512)).trimStart()}catch{}
+    const looksHls=prefix.startsWith('#EXTM3U');
+    const looksTs=bytes.length>376 && bytes[0]===0x47 && bytes[188]===0x47 && bytes[376]===0x47;
+
+    let kind='unknown';
+    if(looksHls)kind='hls';
+    else if(looksTs)kind='ts';
+    else if(ct.includes('mpegurl')||ct.includes('vnd.apple')||ct.includes('x-mpegurl'))kind='hls';
+    else if(ct.includes('mp2t')||ct.includes('mpegts'))kind='ts';
+
+    return {ok:true,status:r.status,contentType:ct,kind,prefix:prefix.slice(0,32)}
   }finally{clearTimeout(timer)}
 }
 
@@ -344,12 +379,12 @@ export default{async fetch(req,env){const u=new URL(req.url),p=u.pathname;if(p==
     if(!/^\d+$/.test(id))return json({error:'Invalid stream id'},400);
     const base=clean(s.server)+'/live/'+encodeURIComponent(s.username)+'/'+encodeURIComponent(s.password)+'/'+id;
     let hlsInfo=null,tsInfo=null;
-    try{hlsInfo=await probeOne(base+'.m3u8')}catch(e){hlsInfo={ok:false,status:0,contentType:'',error:e.name==='AbortError'?'timeout':e.message}}
-    const hct=(hlsInfo?.contentType||'').toLowerCase();
-    const hlsLooksPlaylist=!!(hlsInfo?.ok&&(hct.includes('mpegurl')||hct.includes('vnd.apple')||hct.includes('x-mpegurl')||hct.startsWith('text/')));
-    if(hlsLooksPlaylist)return json({mode:'hls',url:'/live/'+id+'.m3u8',detail:'HLS '+hlsInfo.status+' '+hct});
-    try{tsInfo=await probeOne(base+'.ts')}catch(e){tsInfo={ok:false,status:0,contentType:'',error:e.name==='AbortError'?'timeout':e.message}}
-    if(tsInfo?.ok)return json({mode:'ts',url:'/live/'+id+'.ts',detail:'TS '+tsInfo.status+' '+(tsInfo.contentType||'')});
-    if(hlsInfo?.ok)return json({mode:'ts',url:'/live/'+id+'.m3u8',detail:'binary '+hlsInfo.status+' '+hct});
+    try{hlsInfo=await probeOne(base+'.m3u8')}catch(e){hlsInfo={ok:false,status:0,contentType:'',kind:'error',error:e.name==='AbortError'?'timeout':e.message}}
+    if(hlsInfo?.ok&&hlsInfo.kind==='hls')return json({mode:'hls',url:'/live/'+id+'.m3u8?force=hls',detail:'HLS sniffed · '+hlsInfo.status+' · '+(hlsInfo.contentType||'unknown')});
+    if(hlsInfo?.ok&&hlsInfo.kind==='ts')return json({mode:'ts',url:'/live/'+id+'.m3u8?force=ts',detail:'TS sniffed from m3u8 · '+hlsInfo.status+' · '+(hlsInfo.contentType||'unknown')});
+    try{tsInfo=await probeOne(base+'.ts')}catch(e){tsInfo={ok:false,status:0,contentType:'',kind:'error',error:e.name==='AbortError'?'timeout':e.message}}
+    if(tsInfo?.ok&&tsInfo.kind==='hls')return json({mode:'hls',url:'/live/'+id+'.ts?force=hls',detail:'HLS sniffed from ts · '+tsInfo.status});
+    if(tsInfo?.ok)return json({mode:'ts',url:'/live/'+id+'.ts?force=ts',detail:'TS fallback · '+tsInfo.status+' · '+(tsInfo.contentType||'unknown')});
+    if(hlsInfo?.ok)return json({mode:'hls',url:'/live/'+id+'.m3u8?force=hls',detail:'Unknown m3u8 response · '+hlsInfo.status});
     return json({error:'Upstream stream unavailable. HLS '+(hlsInfo?.status||0)+' / TS '+(tsInfo?.status||0)},502)
-  }let m=p.match(/^\/live\/(\d+)\.m3u8$/);if(m)return media(req,env,clean(s.server)+'/live/'+encodeURIComponent(s.username)+'/'+encodeURIComponent(s.password)+'/'+m[1]+'.m3u8');m=p.match(/^\/live\/(\d+)\.ts$/);if(m)return media(req,env,clean(s.server)+'/live/'+encodeURIComponent(s.username)+'/'+encodeURIComponent(s.password)+'/'+m[1]+'.ts');m=p.match(/^\/movie\/(\d+)\.([a-zA-Z0-9]{2,6})$/);if(m)return media(req,env,clean(s.server)+'/movie/'+encodeURIComponent(s.username)+'/'+encodeURIComponent(s.password)+'/'+m[1]+'.'+m[2]);if(p==='/proxy'){const target=u.searchParams.get('u')||'',sg=u.searchParams.get('s')||'';if(!target||!sg||!(await verify(env,target,sg)))return new Response('Invalid stream token',{status:403});return media(req,env,target)}return new Response('Not found',{status:404})}};
+  }let m=p.match(/^\/live\/(\d+)\.m3u8$/);if(m)return media(req,env,clean(s.server)+'/live/'+encodeURIComponent(s.username)+'/'+encodeURIComponent(s.password)+'/'+m[1]+'.m3u8',u.searchParams.get('force')||'auto');m=p.match(/^\/live\/(\d+)\.ts$/);if(m)return media(req,env,clean(s.server)+'/live/'+encodeURIComponent(s.username)+'/'+encodeURIComponent(s.password)+'/'+m[1]+'.ts',u.searchParams.get('force')||'auto');m=p.match(/^\/movie\/(\d+)\.([a-zA-Z0-9]{2,6})$/);if(m)return media(req,env,clean(s.server)+'/movie/'+encodeURIComponent(s.username)+'/'+encodeURIComponent(s.password)+'/'+m[1]+'.'+m[2]);if(p==='/proxy'){const target=u.searchParams.get('u')||'',sg=u.searchParams.get('s')||'';if(!target||!sg||!(await verify(env,target,sg)))return new Response('Invalid stream token',{status:403});return media(req,env,target)}return new Response('Not found',{status:404})}};
