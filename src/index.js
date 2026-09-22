@@ -8,21 +8,223 @@ const HTML=String.raw`<!doctype html><html><head><meta charset="utf-8"><meta nam
 <div class="app hidden" id="app"><aside class="side" id="side"><div class="sidebrand"><div class="slogo">MX</div><div><strong>MX TV</strong><span>by MazenmiX</span></div></div><nav class="nav"><button class="navbtn active" data-view="home"><span>⌂</span><b>Home</b></button><button class="navbtn" data-view="live"><span>◉</span><b>Live TV</b></button><button class="navbtn" data-view="favorites"><span>★</span><b>Favorites</b></button><button class="navbtn" data-view="movies"><span>▶</span><b>Movies</b></button><button class="navbtn" data-view="series"><span>▣</span><b>Series</b></button><button class="navbtn" data-view="search"><span>⌕</span><b>Search</b></button></nav><div class="sidebottom"><button class="navbtn" data-view="settings"><span>⚙</span><b>Settings</b></button><div class="status"><i></i><span>Connected</span></div></div></aside><main class="main"><header class="top"><div class="topleft"><button class="menu" id="menu">☰</button><div><div class="kicker">MX TV • CONNECTED</div><h1 id="title">Home</h1></div></div><div class="topright"><div class="clock" id="clock"></div><button class="round" id="quick">⌕</button></div></header><section class="content" id="content"></section></main></div>
 <div class="player hidden" id="player"><div class="playerbox"><div class="playtop"><div><div class="kicker">NOW PLAYING</div><strong id="ptitle">Channel</strong></div><button class="round" id="close">✕</button></div><video id="video" controls autoplay playsinline></video><div class="pinfo" id="pinfo"></div></div></div><div class="toast" id="toast"></div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.18/dist/hls.min.js"></script><script>
-const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>[...r.querySelectorAll(s)],KEY='mxtv_profiles_worker',FAV='mxtv_favs_worker';let hls=null;const state={view:'home',cat:'all',src:null,data:{live:[],movies:[],series:[]},favorites:JSON.parse(localStorage.getItem(FAV)||'[]')};
-function esc(v=''){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function toast(t){const x=$('#toast');x.textContent=t;x.classList.add('show');setTimeout(()=>x.classList.remove('show'),2200)}function profiles(){try{return JSON.parse(localStorage.getItem(KEY)||'[]')}catch{return[]}}function saveProfiles(a){localStorage.setItem(KEY,JSON.stringify(a.slice(0,12)))}function refreshHistory(){const a=profiles();$('#history').innerHTML='<option value="">Choose a previous login…</option>'+a.map((p,i)=>'<option value="'+i+'">'+esc(p.username+' @ '+p.server.replace(/^https?:\/\//,''))+'</option>').join('');$('#histwrap').classList.toggle('hidden',!a.length)}
-$('#load').onclick=()=>{const a=profiles(),i=Number($('#history').value);if(!a[i])return;$('#server').value=a[i].server;$('#user').value=a[i].username};$('#del').onclick=()=>{const a=profiles(),i=Number($('#history').value);if(!a[i])return;a.splice(i,1);saveProfiles(a);refreshHistory()};$('#eye').onclick=e=>{e.preventDefault();$('#pass').type=$('#pass').type==='password'?'text':'password'};
-async function req(url,opt){const r=await fetch(url,opt);let d;try{d=await r.json()}catch{d={error:'Invalid response'}}if(!r.ok)throw Error(d.error||('HTTP '+r.status));return d}
-async function connect(){const server=$('#server').value.trim().replace(/\/+$/,''),username=$('#user').value.trim(),password=$('#pass').value,remember=$('#remember').checked;if(!server||!username||!password){$('#err').textContent='Enter server URL, username and password.';return}const b=$('#connect');b.disabled=true;b.textContent='Connecting…';$('#err').textContent='';try{const d=await req('/api/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({server,username,password,remember})});state.src={server,username,user_info:d.user_info};if(remember){let a=profiles().filter(x=>!(x.server===server&&x.username===username));a.unshift({server,username});saveProfiles(a);refreshHistory()}await loadAll();$('#login').classList.add('hidden');$('#app').classList.remove('hidden');render();toast('Connected to MX TV')}catch(e){$('#err').textContent=e.message}finally{b.disabled=false;b.textContent='Connect to MX TV'}}
-$('#connect').onclick=connect;['server','user','pass'].forEach(id=>$('#'+id).addEventListener('keydown',e=>{if(e.key==='Enter')connect()}));
-async function action(a){return req('/api/action?action='+encodeURIComponent(a))}async function loadAll(){const [lc,ls,vc,vs,sc,ss]=await Promise.all([action('get_live_categories'),action('get_live_streams'),action('get_vod_categories'),action('get_vod_streams'),action('get_series_categories'),action('get_series')]);const lm=Object.fromEntries((lc||[]).map(x=>[String(x.category_id),x.category_name])),vm=Object.fromEntries((vc||[]).map(x=>[String(x.category_id),x.category_name])),sm=Object.fromEntries((sc||[]).map(x=>[String(x.category_id),x.category_name]));state.data.live=(ls||[]).map(x=>({id:'l'+x.stream_id,name:x.name,cat:lm[String(x.category_id)]||'Live',logo:x.stream_icon||'',url:'/live/'+x.stream_id+'.m3u8'}));state.data.movies=(vs||[]).map(x=>({id:'m'+x.stream_id,name:x.name,cat:vm[String(x.category_id)]||'Movies',logo:x.stream_icon||'',url:'/movie/'+x.stream_id+'.'+(x.container_extension||'mp4')}));state.data.series=(ss||[]).map(x=>({id:'s'+x.series_id,name:x.name,cat:sm[String(x.category_id)]||'Series',logo:x.cover||'',url:''}))}
-function clock(){try{$('#clock').textContent=new Intl.DateTimeFormat(undefined,{weekday:'short',hour:'2-digit',minute:'2-digit'}).format(new Date())}catch{}}setInterval(clock,1000);clock();const side=$('#side'),content=$('#content');function view(v){state.view=v;state.cat='all';$$('.navbtn[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===v));side.classList.remove('open');render()}$$('.navbtn[data-view]').forEach(b=>b.onclick=()=>view(b.dataset.view));$('#menu').onclick=()=>side.classList.toggle('open');$('#quick').onclick=()=>view('search');
-function all(){return [...state.data.live,...state.data.movies,...state.data.series]}function item(id){return all().find(x=>String(x.id)===String(id))}function fav(id){return state.favorites.includes(String(id))}function toggle(id){id=String(id);state.favorites=fav(id)?state.favorites.filter(x=>x!==id):[...state.favorites,id];localStorage.setItem(FAV,JSON.stringify(state.favorites));render()}function icon(n){const t=esc(n).replace(/[^a-z0-9]/gi,'').slice(0,3).toUpperCase()||'MX';return 'data:image/svg+xml;charset=UTF-8,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="22" fill="#151d28"/><text x="50" y="58" text-anchor="middle" font-family="Arial" font-size="21" font-weight="900" fill="#d8b46f">'+t+'</text></svg>')}function tile(x,t='live'){return '<button class="tile" data-play="'+esc(x.id)+'"><small>'+t.toUpperCase()+'</small><img src="'+(x.logo||icon(x.name))+'"><h4>'+esc(x.name)+'</h4><p>'+esc(x.cat||'')+'</p></button>'}
-function home(){const u=state.src?.username||'';return '<div class="hero"><div class="herocopy"><span class="badge">'+(u?'CONNECTED • '+esc(u):'MX TV WEB')+'</span><h2>Your TV.<br>Beautifully simple.</h2><p>Live channels, movies, series and favorites in a premium interface built for every screen.</p><div class="actions"><button class="btn primary" data-jump="live">▶ Watch Live</button><button class="btn" data-jump="favorites">★ Favorites</button></div></div></div><div class="kpis"><div class="kpi"><b>'+state.data.live.length+'</b><span>Live Channels</span></div><div class="kpi"><b>'+state.data.movies.length+'</b><span>Movies</span></div><div class="kpi"><b>'+state.data.series.length+'</b><span>Series</span></div><div class="kpi"><b>'+state.favorites.length+'</b><span>Favorites</span></div></div><div class="sectionhead"><h3>Live Now</h3></div><div class="grid">'+state.data.live.slice(0,12).map(x=>tile(x)).join('')+'</div>'}
-function list(kind,label){let a=kind==='favorites'?all().filter(x=>fav(x.id)):(state.data[kind]||[]);const cats=['all',...new Set(a.map(x=>x.cat).filter(Boolean))];if(state.cat!=='all')a=a.filter(x=>x.cat===state.cat);return '<div class="split"><div class="panel"><div class="ptitle">'+label+' Categories</div><div class="cats">'+cats.map(c=>'<button class="cat '+(state.cat===c?'active':'')+'" data-cat="'+esc(c)+'">'+(c==='all'?'All':esc(c))+'</button>').join('')+'</div></div><div class="panel"><div class="toolbar"><input class="search" id="filter" placeholder="Search '+label.toLowerCase()+'..."></div><div class="rows">'+(a.map(x=>'<div class="row" data-play="'+esc(x.id)+'"><img src="'+(x.logo||icon(x.name))+'"><div><b>'+esc(x.name)+'</b><small>'+esc(x.cat||'')+'</small></div><button class="star '+(fav(x.id)?'on':'')+'" data-fav="'+esc(x.id)+'">★</button></div>').join('')||'<div class="empty">Nothing here yet.</div>')+'</div></div></div>'}
-function searchPage(){return '<div class="settings"><h3>Search everything</h3><input class="search" id="gsearch" placeholder="Channel, movie or series name..."><div class="rows" id="results"><div class="empty">Start typing to search.</div></div></div>'}function settings(){return '<div class="settings"><h3>Account & Device</h3><div class="account"><div><b>'+esc(state.src?.username||'')+'</b><span>'+esc(state.src?.server||'')+'</span></div><div class="actions" style="margin:0"><button class="btn" id="switch">Switch Server</button><button class="btn danger" id="logout">Logout</button></div></div></div>'}
-function render(){const n={home:'Home',live:'Live TV',favorites:'Favorites',movies:'Movies',series:'Series',search:'Search',settings:'Settings'};$('#title').textContent=n[state.view]||'MX TV';content.innerHTML=state.view==='home'?home():state.view==='live'?list('live','Live TV'):state.view==='favorites'?list('favorites','Favorites'):state.view==='movies'?list('movies','Movies'):state.view==='series'?list('series','Series'):state.view==='search'?searchPage():settings();bind()}function bind(){$$('[data-jump]').forEach(b=>b.onclick=()=>view(b.dataset.jump));$$('[data-fav]').forEach(b=>b.onclick=e=>{e.stopPropagation();toggle(b.dataset.fav)});$$('[data-cat]').forEach(b=>b.onclick=()=>{state.cat=b.dataset.cat;render()});$$('[data-play]').forEach(x=>x.onclick=e=>{if(!e.target.closest('[data-fav]'))play(item(x.dataset.play))});const f=$('#filter');if(f)f.oninput=()=>$$('.row').forEach(r=>r.style.display=r.innerText.toLowerCase().includes(f.value.toLowerCase())?'grid':'none');const g=$('#gsearch');if(g)g.oninput=()=>{const q=g.value.toLowerCase().trim(),a=all().filter(x=>x.name.toLowerCase().includes(q)).slice(0,60);$('#results').innerHTML=q?a.map(x=>'<div class="row" data-play="'+esc(x.id)+'"><img src="'+(x.logo||icon(x.name))+'"><div><b>'+esc(x.name)+'</b><small>'+esc(x.cat||'')+'</small></div></div>').join(''):'<div class="empty">Start typing to search.</div>';bind()};const sw=$('#switch');if(sw)sw.onclick=()=>{$('#app').classList.add('hidden');$('#login').classList.remove('hidden')};const lo=$('#logout');if(lo)lo.onclick=async()=>{await fetch('/api/logout',{method:'POST'});state.src=null;state.data={live:[],movies:[],series:[]};$('#app').classList.add('hidden');$('#login').classList.remove('hidden')}}
-function play(x){if(!x)return;if(!x.url){toast('Series episode browser is next.');return}$('#ptitle').textContent=x.name;$('#pinfo').textContent=x.cat||'';$('#player').classList.remove('hidden');const v=$('#video');if(hls){hls.destroy();hls=null}v.pause();v.removeAttribute('src');v.load();if(/\.m3u8($|\?)/i.test(x.url)&&window.Hls&&Hls.isSupported()){hls=new Hls({enableWorker:true,lowLatencyMode:true,maxBufferLength:30});hls.loadSource(x.url);hls.attachMedia(v)}else v.src=x.url;v.play().catch(()=>{})}$('#close').onclick=()=>{$('#player').classList.add('hidden');$('#video').pause();if(hls){hls.destroy();hls=null}};$('#player').onclick=e=>{if(e.target.id==='player')$('#close').click()};
-async function boot(){refreshHistory();try{const s=await req('/api/session');if(!s.ok)return;state.src={server:s.server,username:s.username,user_info:s.user_info};await loadAll();$('#login').classList.add('hidden');$('#app').classList.remove('hidden');render()}catch{}}boot();
+const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>[...r.querySelectorAll(s)];
+const KEY='mxtv_profiles_worker',FAV='mxtv_favs_worker';
+let hls=null,filterTimer=null;
+const state={
+  view:'home',cat:'all',query:'',limit:80,src:null,
+  data:{live:[],movies:[],series:[]},
+  cats:{live:[],movies:[],series:[]},
+  favorites:JSON.parse(localStorage.getItem(FAV)||'[]')
+};
+
+function esc(v=''){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function toast(t){const x=$('#toast');x.textContent=t;x.classList.add('show');clearTimeout(window.__mxToast);window.__mxToast=setTimeout(()=>x.classList.remove('show'),2200)}
+function profiles(){try{return JSON.parse(localStorage.getItem(KEY)||'[]')}catch{return[]}}
+function saveProfiles(a){localStorage.setItem(KEY,JSON.stringify(a.slice(0,12)))}
+function refreshHistory(){
+  const a=profiles();
+  $('#history').innerHTML='<option value="">Choose a previous login…</option>'+a.map((p,i)=>'<option value="'+i+'">'+esc(p.username+' @ '+p.server.replace(/^https?:\/\//,''))+'</option>').join('');
+  $('#histwrap').classList.toggle('hidden',!a.length)
+}
+$('#load').onclick=()=>{const a=profiles(),i=Number($('#history').value);if(!a[i])return;$('#server').value=a[i].server;$('#user').value=a[i].username};
+$('#del').onclick=()=>{const a=profiles(),i=Number($('#history').value);if(!a[i])return;a.splice(i,1);saveProfiles(a);refreshHistory()};
+$('#eye').onclick=e=>{e.preventDefault();$('#pass').type=$('#pass').type==='password'?'text':'password'};
+
+async function req(url,opt){
+  const r=await fetch(url,opt);
+  let d;try{d=await r.json()}catch{d={error:'Invalid response'}};
+  if(!r.ok)throw Error(d.error||('HTTP '+r.status));
+  return d
+}
+async function connect(){
+  const server=$('#server').value.trim().replace(/\/+$/,''),username=$('#user').value.trim(),password=$('#pass').value,remember=$('#remember').checked;
+  if(!server||!username||!password){$('#err').textContent='Enter server URL, username and password.';return}
+  const b=$('#connect');b.disabled=true;b.textContent='Connecting…';$('#err').textContent='';
+  try{
+    const d=await req('/api/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({server,username,password,remember})});
+    state.src={server,username,user_info:d.user_info};
+    if(remember){
+      let a=profiles().filter(x=>!(x.server===server&&x.username===username));
+      a.unshift({server,username});saveProfiles(a);refreshHistory()
+    }
+    await loadAll();
+    $('#login').classList.add('hidden');$('#app').classList.remove('hidden');
+    state.view='home';state.cat='all';state.query='';state.limit=80;
+    render();toast('Connected to MX TV')
+  }catch(e){$('#err').textContent=e.message}
+  finally{b.disabled=false;b.textContent='Connect to MX TV'}
+}
+$('#connect').onclick=connect;
+['server','user','pass'].forEach(id=>$('#'+id).addEventListener('keydown',e=>{if(e.key==='Enter')connect()}));
+
+async function action(a){return req('/api/action?action='+encodeURIComponent(a))}
+async function loadAll(){
+  const [lc,ls,vc,vs,sc,ss]=await Promise.all([
+    action('get_live_categories'),action('get_live_streams'),
+    action('get_vod_categories'),action('get_vod_streams'),
+    action('get_series_categories'),action('get_series')
+  ]);
+  const lca=Array.isArray(lc)?lc:[],lsa=Array.isArray(ls)?ls:[],
+        vca=Array.isArray(vc)?vc:[],vsa=Array.isArray(vs)?vs:[],
+        sca=Array.isArray(sc)?sc:[],ssa=Array.isArray(ss)?ss:[];
+  const lm=Object.fromEntries(lca.map(x=>[String(x.category_id),x.category_name])),
+        vm=Object.fromEntries(vca.map(x=>[String(x.category_id),x.category_name])),
+        sm=Object.fromEntries(sca.map(x=>[String(x.category_id),x.category_name]));
+  state.cats.live=lca.map(x=>x.category_name).filter(Boolean);
+  state.cats.movies=vca.map(x=>x.category_name).filter(Boolean);
+  state.cats.series=sca.map(x=>x.category_name).filter(Boolean);
+  state.data.live=lsa.map(x=>({id:'l'+x.stream_id,name:x.name||'Channel',cat:lm[String(x.category_id)]||'Live',logo:x.stream_icon||'',url:'/live/'+x.stream_id+'.m3u8'}));
+  state.data.movies=vsa.map(x=>({id:'m'+x.stream_id,name:x.name||'Movie',cat:vm[String(x.category_id)]||'Movies',logo:x.stream_icon||'',url:'/movie/'+x.stream_id+'.'+(x.container_extension||'mp4')}));
+  state.data.series=ssa.map(x=>({id:'s'+x.series_id,name:x.name||'Series',cat:sm[String(x.category_id)]||'Series',logo:x.cover||'',url:''}))
+}
+
+function clock(){try{$('#clock').textContent=new Intl.DateTimeFormat(undefined,{weekday:'short',hour:'2-digit',minute:'2-digit'}).format(new Date())}catch{}}
+setInterval(clock,1000);clock();
+
+const side=$('#side'),content=$('#content');
+function view(v){
+  state.view=v;state.cat='all';state.query='';state.limit=80;
+  $$('.navbtn[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===v));
+  side.classList.remove('open');render()
+}
+$$('.navbtn[data-view]').forEach(b=>b.onclick=()=>view(b.dataset.view));
+$('#menu').onclick=()=>side.classList.toggle('open');
+$('#quick').onclick=()=>view('search');
+
+function dataFor(kind){return state.data[kind]||[]}
+function item(id){
+  id=String(id||'');
+  const arr=id.startsWith('l')?state.data.live:id.startsWith('m')?state.data.movies:id.startsWith('s')?state.data.series:null;
+  return arr?arr.find(x=>String(x.id)===id):null
+}
+function favoriteItems(){
+  const out=[];
+  for(const id of state.favorites){const x=item(id);if(x)out.push(x)}
+  return out
+}
+function fav(id){return state.favorites.includes(String(id))}
+function toggle(id){
+  id=String(id);
+  state.favorites=fav(id)?state.favorites.filter(x=>x!==id):[...state.favorites,id];
+  localStorage.setItem(FAV,JSON.stringify(state.favorites));render()
+}
+function icon(n){
+  const t=esc(n).replace(/[^a-z0-9]/gi,'').slice(0,3).toUpperCase()||'MX';
+  return 'data:image/svg+xml;charset=UTF-8,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="22" fill="#151d28"/><text x="50" y="58" text-anchor="middle" font-family="Arial" font-size="21" font-weight="900" fill="#d8b46f">'+t+'</text></svg>')
+}
+function tile(x,t='live'){
+  return '<button class="tile" data-play="'+esc(x.id)+'"><small>'+t.toUpperCase()+'</small><img loading="lazy" src="'+(x.logo||icon(x.name))+'"><h4>'+esc(x.name)+'</h4><p>'+esc(x.cat||'')+'</p></button>'
+}
+function row(x){
+  return '<div class="row" data-play="'+esc(x.id)+'"><img loading="lazy" src="'+(x.logo||icon(x.name))+'"><div><b>'+esc(x.name)+'</b><small>'+esc(x.cat||'')+'</small></div><button class="star '+(fav(x.id)?'on':'')+'" data-fav="'+esc(x.id)+'">★</button></div>'
+}
+function home(){
+  const u=state.src?.username||'';
+  return '<div class="hero"><div class="herocopy"><span class="badge">'+(u?'CONNECTED • '+esc(u):'MX TV WEB')+'</span><h2>Your TV.<br>Beautifully simple.</h2><p>Live channels, movies, series and favorites in a premium interface built for every screen.</p><div class="actions"><button class="btn primary" data-jump="live">▶ Watch Live</button><button class="btn" data-jump="favorites">★ Favorites</button></div></div></div>'+
+    '<div class="kpis"><div class="kpi"><b>'+state.data.live.length.toLocaleString()+'</b><span>Live Channels</span></div><div class="kpi"><b>'+state.data.movies.length.toLocaleString()+'</b><span>Movies</span></div><div class="kpi"><b>'+state.data.series.length.toLocaleString()+'</b><span>Series</span></div><div class="kpi"><b>'+state.favorites.length.toLocaleString()+'</b><span>Favorites</span></div></div>'+
+    '<div class="sectionhead"><h3>Live Now</h3></div><div class="grid">'+state.data.live.slice(0,12).map(x=>tile(x)).join('')+'</div>'
+}
+function list(kind,label){
+  let a=kind==='favorites'?favoriteItems():dataFor(kind);
+  const cats=kind==='favorites'?[...new Set(a.map(x=>x.cat).filter(Boolean))]:(state.cats[kind]||[]);
+  if(state.cat!=='all')a=a.filter(x=>x.cat===state.cat);
+  if(state.query){
+    const q=state.query.toLowerCase();
+    a=a.filter(x=>(x.name||'').toLowerCase().includes(q)||(x.cat||'').toLowerCase().includes(q))
+  }
+  const total=a.length,visible=a.slice(0,state.limit);
+  const mobileSelect='<select id="catSelect" class="search" style="max-width:240px"><option value="all">All Categories</option>'+cats.map(c=>'<option value="'+esc(c)+'" '+(state.cat===c?'selected':'')+'>'+esc(c)+'</option>').join('')+'</select>';
+  const more=total>visible.length?'<div style="padding:14px;text-align:center"><button class="btn" id="more">Load more · '+visible.length.toLocaleString()+' / '+total.toLocaleString()+'</button></div>':'';
+  return '<div class="split"><div class="panel"><div class="ptitle">'+label+' Categories</div><div class="cats"><button class="cat '+(state.cat==='all'?'active':'')+'" data-cat="all">All</button>'+cats.map(c=>'<button class="cat '+(state.cat===c?'active':'')+'" data-cat="'+esc(c)+'">'+esc(c)+'</button>').join('')+'</div></div>'+
+    '<div class="panel"><div class="toolbar" style="display:flex;gap:10px;flex-wrap:wrap"><input class="search" id="filter" value="'+esc(state.query)+'" placeholder="Search '+label.toLowerCase()+'..." style="flex:1;min-width:180px">'+mobileSelect+'</div>'+
+    '<div style="padding:9px 16px;color:#8d99aa;font-size:12px">Showing '+visible.length.toLocaleString()+' of '+total.toLocaleString()+'</div>'+
+    '<div class="rows">'+(visible.map(row).join('')||'<div class="empty">Nothing here yet.</div>')+'</div>'+more+'</div></div>'
+}
+function searchMatches(q,limit=80){
+  q=(q||'').trim().toLowerCase();if(!q)return[];
+  const out=[];
+  for(const arr of [state.data.live,state.data.movies,state.data.series]){
+    for(const x of arr){
+      if((x.name||'').toLowerCase().includes(q)||(x.cat||'').toLowerCase().includes(q)){out.push(x);if(out.length>=limit)return out}
+    }
+  }
+  return out
+}
+function searchPage(){
+  return '<div class="settings"><h3>Search everything</h3><input class="search" id="gsearch" placeholder="Channel, movie or series name..."><div style="padding:10px 0;color:#8d99aa;font-size:12px">Searches all loaded Live TV, Movies and Series without rendering the full library.</div><div class="rows" id="results"><div class="empty">Start typing to search.</div></div></div>'
+}
+function settings(){
+  return '<div class="settings"><h3>Account & Device</h3><div class="account"><div><b>'+esc(state.src?.username||'')+'</b><span>'+esc(state.src?.server||'')+'</span></div><div class="actions" style="margin:0"><button class="btn" id="switch">Switch Server</button><button class="btn danger" id="logout">Logout</button></div></div></div>'
+}
+function render(){
+  const n={home:'Home',live:'Live TV',favorites:'Favorites',movies:'Movies',series:'Series',search:'Search',settings:'Settings'};
+  $('#title').textContent=n[state.view]||'MX TV';
+  content.innerHTML=state.view==='home'?home():
+    state.view==='live'?list('live','Live TV'):
+    state.view==='favorites'?list('favorites','Favorites'):
+    state.view==='movies'?list('movies','Movies'):
+    state.view==='series'?list('series','Series'):
+    state.view==='search'?searchPage():settings();
+  bind()
+}
+function bind(){
+  $$('[data-jump]').forEach(b=>b.onclick=()=>view(b.dataset.jump));
+  $$('[data-fav]').forEach(b=>b.onclick=e=>{e.stopPropagation();toggle(b.dataset.fav)});
+  $$('[data-cat]').forEach(b=>b.onclick=()=>{state.cat=b.dataset.cat;state.query='';state.limit=80;render()});
+  $$('[data-play]').forEach(x=>x.onclick=e=>{if(!e.target.closest('[data-fav]'))play(item(x.dataset.play))});
+  const cs=$('#catSelect');if(cs)cs.onchange=()=>{state.cat=cs.value;state.query='';state.limit=80;render()};
+  const more=$('#more');if(more)more.onclick=()=>{state.limit+=80;render()};
+  const f=$('#filter');
+  if(f)f.oninput=()=>{
+    const value=f.value, pos=f.selectionStart;
+    clearTimeout(filterTimer);
+    filterTimer=setTimeout(()=>{
+      state.query=value;state.limit=80;render();
+      const nf=$('#filter');if(nf){nf.focus();try{nf.setSelectionRange(pos,pos)}catch{}}
+    },180)
+  };
+  const g=$('#gsearch');
+  if(g)g.oninput=()=>{
+    const q=g.value;
+    clearTimeout(filterTimer);
+    filterTimer=setTimeout(()=>{
+      const a=searchMatches(q,80);
+      $('#results').innerHTML=q.trim()?(a.map(row).join('')||'<div class="empty">No results.</div>'):'<div class="empty">Start typing to search.</div>';
+      $$('[data-play]',$('#results')).forEach(x=>x.onclick=e=>{if(!e.target.closest('[data-fav]'))play(item(x.dataset.play))});
+      $$('[data-fav]',$('#results')).forEach(b=>b.onclick=e=>{e.stopPropagation();toggle(b.dataset.fav)})
+    },180)
+  };
+  const sw=$('#switch');if(sw)sw.onclick=()=>{$('#app').classList.add('hidden');$('#login').classList.remove('hidden')};
+  const lo=$('#logout');if(lo)lo.onclick=async()=>{await fetch('/api/logout',{method:'POST'});state.src=null;state.data={live:[],movies:[],series:[]};state.cats={live:[],movies:[],series:[]};$('#app').classList.add('hidden');$('#login').classList.remove('hidden')}
+}
+function play(x){
+  if(!x)return;
+  if(!x.url){toast('Series episode browser is next.');return}
+  $('#ptitle').textContent=x.name;$('#pinfo').textContent=x.cat||'';$('#player').classList.remove('hidden');
+  const v=$('#video');if(hls){hls.destroy();hls=null}
+  v.pause();v.removeAttribute('src');v.load();
+  if(/\.m3u8($|\?)/i.test(x.url)&&window.Hls&&Hls.isSupported()){
+    hls=new Hls({enableWorker:true,lowLatencyMode:true,maxBufferLength:20,backBufferLength:20});
+    hls.on(Hls.Events.ERROR,(ev,data)=>{if(data.fatal)toast('Stream error — trying another player mode may help.')});
+    hls.loadSource(x.url);hls.attachMedia(v)
+  }else v.src=x.url;
+  v.play().catch(()=>{})
+}
+$('#close').onclick=()=>{$('#player').classList.add('hidden');$('#video').pause();if(hls){hls.destroy();hls=null}};
+$('#player').onclick=e=>{if(e.target.id==='player')$('#close').click()};
+
+async function boot(){
+  refreshHistory();
+  try{
+    const s=await req('/api/session');if(!s.ok)return;
+    state.src={server:s.server,username:s.username,user_info:s.user_info};
+    await loadAll();
+    $('#login').classList.add('hidden');$('#app').classList.remove('hidden');
+    state.view='home';state.limit=80;render()
+  }catch{}
+}
+boot();
 </script></body></html>`;
 
 function b64u(bytes){let s='';for(const b of bytes)s+=String.fromCharCode(b);return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}
