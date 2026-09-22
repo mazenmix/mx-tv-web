@@ -234,23 +234,26 @@ async function play(x){
 
   const v=$('#video');
   let fallbackStarted=false;
+  let tsMode=0;
+  let playToken=Date.now()+Math.random();
 
   const setInfo=(msg)=>{$('#pinfo').textContent=(x.cat||'')+(msg?' · '+msg:'')};
-
-  const runDiagnostics=async(label)=>{
-    if(!x.streamId)return;
-    try{
-      const d=await req('/api/debug-live?id='+encodeURIComponent(x.streamId));
-      const h=d.hls||{},t=d.ts||{};
-      const diag='HLS '+(h.status||0)+' '+(h.kind||'')+' '+(h.contentType||'')+' | TS '+(t.status||0)+' '+(t.kind||'')+' '+(t.contentType||'');
-      setInfo(label+' · '+diag);
-      console.log('MXTV live diagnostics',d);
-    }catch(e){
-      setInfo(label+' · diagnostics failed: '+e.message);
+  const benignPlayError=(e)=>{
+    const m=String(e&&e.message||e||'');
+    return /interrupted by a call to pause|play\(\) request was interrupted|AbortError/i.test(m)
+  };
+  const tryVideoPlay=()=>{
+    const token=playToken;
+    const p=v.play();
+    if(p&&typeof p.catch==='function'){
+      p.catch(e=>{
+        if(token!==playToken||benignPlayError(e))return;
+        console.warn('MXTV play() rejected',e);
+      })
     }
   };
 
-  const cleanup=()=>{
+  const destroyPlayers=()=>{
     if(hls){try{hls.destroy()}catch{}hls=null}
     if(mpegPlayer){try{mpegPlayer.destroy()}catch{}mpegPlayer=null}
     v.onerror=null;
@@ -259,72 +262,127 @@ async function play(x){
     try{v.load()}catch{}
   };
 
-  cleanup();
+  destroyPlayers();
 
   const formats=(state.src?.user_info?.allowed_output_formats||[]).map(v=>String(v).toLowerCase());
   const hasHls=formats.length===0||formats.includes('m3u8')||formats.includes('hls');
   const hasTs=formats.length===0||formats.includes('ts')||formats.includes('mpegts');
   const hlsUrl=x.streamId?('/live/'+x.streamId+'.m3u8?force=hls'):x.url;
-  const tsUrl=x.streamId?('/live/'+x.streamId+'.ts?force=ts'):x.url;
+  const tsUrls=x.streamId?[
+    '/live/'+x.streamId+'.ts?force=ts',
+    '/live/'+x.streamId+'.m3u8?force=ts'
+  ]:[x.url];
   const nativeHls=!!v.canPlayType('application/vnd.apple.mpegurl');
 
-  const startTs=()=>{
-    if(fallbackStarted)return;
-    fallbackStarted=true;
+  const startTsMode=(mode)=>{
+    if(mode>=tsUrls.length){
+      setInfo('TS failed');
+      toast('TS playback failed on both Xtream output modes.');
+      return
+    }
+
+    tsMode=mode+1;
+    playToken=Date.now()+Math.random();
+
     if(hls){try{hls.destroy()}catch{}hls=null}
+    if(mpegPlayer){try{mpegPlayer.destroy()}catch{}mpegPlayer=null}
     v.onerror=null;
     try{v.pause()}catch{}
     v.removeAttribute('src');
     try{v.load()}catch{}
 
+    const tsUrl=tsUrls[mode];
+    setInfo('TS mode '+tsMode);
+
     setTimeout(()=>{
-      setInfo('TS fallback');
       if(window.mpegts&&mpegts.isSupported()){
         try{
+          let failed=false;
           mpegPlayer=mpegts.createPlayer(
             {type:'mpegts',isLive:true,url:tsUrl},
-            {enableWorker:true,enableStashBuffer:false,stashInitialSize:128,lazyLoad:false}
+            {enableWorker:true,enableStashBuffer:false,stashInitialSize:128,lazyLoad:false,autoCleanupSourceBuffer:true}
           );
           mpegPlayer.attachMediaElement(v);
-          mpegPlayer.load();
+
+          const retry=(why)=>{
+            if(failed)return;
+            failed=true;
+            console.warn('MXTV TS mode '+tsMode+' failed',why);
+            if(mpegPlayer){try{mpegPlayer.destroy()}catch{}mpegPlayer=null}
+            try{v.pause()}catch{}
+            v.removeAttribute('src');
+            try{v.load()}catch{}
+            if(mode+1<tsUrls.length){
+              toast('TS mode '+tsMode+' failed — trying alternate Xtream output…');
+              setTimeout(()=>startTsMode(mode+1),700);
+            }else{
+              const parts=Array.isArray(why)?why:[why];
+              const message='TS playback failed · '+parts.filter(Boolean).map(String).join(' · ');
+              setInfo(message);
+              toast(message);
+            }
+          };
+
           mpegPlayer.on(mpegts.Events.ERROR,(type,detail,info)=>{
-            const parts=[type,detail,info&&info.code,info&&info.msg,info&&info.reason].filter(Boolean).map(String);
-            const message='TS playback failed · '+parts.join(' · ');
-            toast(message);
-            runDiagnostics(message);
+            retry([type,detail,info&&info.code,info&&info.msg,info&&info.reason]);
           });
-          mpegPlayer.play().catch(e=>{
-            const message='TS play rejected · '+(e&&e.message?e.message:String(e||'unknown'));
-            toast(message);runDiagnostics(message);
-          });
+          if(mpegts.Events.MEDIA_INFO){
+            mpegPlayer.on(mpegts.Events.MEDIA_INFO,()=>tryVideoPlay());
+          }
+          if(mpegts.Events.METADATA_ARRIVED){
+            mpegPlayer.on(mpegts.Events.METADATA_ARRIVED,()=>tryVideoPlay());
+          }
+
+          mpegPlayer.load();
+          setTimeout(()=>tryVideoPlay(),350);
+
+          // A rejected play() caused by an internal pause is benign; don't fail the stream for it.
+          const pp=mpegPlayer.play();
+          if(pp&&typeof pp.catch==='function'){
+            pp.catch(e=>{
+              if(benignPlayError(e)){
+                console.debug('MXTV ignored benign play interruption',e);
+                setTimeout(()=>tryVideoPlay(),500);
+                return;
+              }
+              retry(['play rejected',e&&e.message?e.message:String(e||'unknown')]);
+            })
+          }
           return
         }catch(e){
-          const message='TS player exception · '+(e&&e.message?e.message:String(e));
-          toast(message);runDiagnostics(message);
+          if(mode+1<tsUrls.length){
+            toast('TS mode '+tsMode+' exception — trying alternate Xtream output…');
+            setTimeout(()=>startTsMode(mode+1),700);
+          }else{
+            const message='TS player exception · '+(e&&e.message?e.message:String(e));
+            setInfo(message);toast(message);
+          }
+          return
         }
       }
 
+      // Native fallback if MSE/mpegts.js is unavailable.
       v.src=tsUrl;
       v.onerror=()=>{
-        const message='Native TS playback failed';
-        toast(message);runDiagnostics(message);
+        if(mode+1<tsUrls.length)startTsMode(mode+1);
+        else{setInfo('Native TS failed');toast('Native TS playback failed.')}
       };
-      v.play().catch(e=>{
-        const message='TS unsupported · '+(e&&e.message?e.message:String(e||'unknown'));
-        toast(message);runDiagnostics(message);
-      });
-    },900)
+      tryVideoPlay();
+    },650)
+  };
+
+  const startTs=()=>{
+    if(fallbackStarted)return;
+    fallbackStarted=true;
+    startTsMode(0);
   };
 
   const startHls=()=>{
     setInfo('HLS');
     if(nativeHls){
       v.src=hlsUrl;
-      v.onerror=()=>{
-        if(hasTs)startTs();
-        else{const message='Native HLS failed';toast(message);runDiagnostics(message)}
-      };
-      v.play().catch(()=>{});
+      v.onerror=()=>{if(hasTs)startTs();else{setInfo('Native HLS failed');toast('Native HLS failed.')}};
+      tryVideoPlay();
       return
     }
 
@@ -332,19 +390,22 @@ async function play(x){
       hls=new Hls({enableWorker:true,lowLatencyMode:false,maxBufferLength:20,backBufferLength:10});
       hls.on(Hls.Events.ERROR,(ev,data)=>{
         if(data.fatal){
-          const message='HLS failed · '+[data.type,data.details,data.response&&data.response.code].filter(Boolean).join(' · ');
+          console.warn('MXTV HLS fatal',data);
           if(hasTs)startTs();
-          else{toast(message);runDiagnostics(message)}
+          else{
+            const message='HLS failed · '+[data.type,data.details,data.response&&data.response.code].filter(Boolean).join(' · ');
+            setInfo(message);toast(message)
+          }
         }
       });
       hls.loadSource(hlsUrl);
       hls.attachMedia(v);
-      hls.on(Hls.Events.MANIFEST_PARSED,()=>v.play().catch(()=>{}));
+      hls.on(Hls.Events.MANIFEST_PARSED,()=>tryVideoPlay());
       return
     }
 
     if(hasTs)startTs();
-    else{const message='HLS unsupported by this browser';toast(message);runDiagnostics(message)}
+    else{setInfo('HLS unsupported');toast('HLS is not supported by this browser.')}
   };
 
   if(hasHls)startHls();
