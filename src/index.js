@@ -234,7 +234,21 @@ async function play(x){
 
   const v=$('#video');
   let fallbackStarted=false;
-  let tsAttempt=0;
+
+  const setInfo=(msg)=>{$('#pinfo').textContent=(x.cat||'')+(msg?' · '+msg:'')};
+
+  const runDiagnostics=async(label)=>{
+    if(!x.streamId)return;
+    try{
+      const d=await req('/api/debug-live?id='+encodeURIComponent(x.streamId));
+      const h=d.hls||{},t=d.ts||{};
+      const diag='HLS '+(h.status||0)+' '+(h.kind||'')+' '+(h.contentType||'')+' | TS '+(t.status||0)+' '+(t.kind||'')+' '+(t.contentType||'');
+      setInfo(label+' · '+diag);
+      console.log('MXTV live diagnostics',d);
+    }catch(e){
+      setInfo(label+' · diagnostics failed: '+e.message);
+    }
+  };
 
   const cleanup=()=>{
     if(hls){try{hls.destroy()}catch{}hls=null}
@@ -250,127 +264,77 @@ async function play(x){
   const formats=(state.src?.user_info?.allowed_output_formats||[]).map(v=>String(v).toLowerCase());
   const hasHls=formats.length===0||formats.includes('m3u8')||formats.includes('hls');
   const hasTs=formats.length===0||formats.includes('ts')||formats.includes('mpegts');
-
   const hlsUrl=x.streamId?('/live/'+x.streamId+'.m3u8?force=hls'):x.url;
   const tsUrl=x.streamId?('/live/'+x.streamId+'.ts?force=ts'):x.url;
-  const hlsAsTsUrl=x.streamId?('/live/'+x.streamId+'.m3u8?force=ts'):x.url;
   const nativeHls=!!v.canPlayType('application/vnd.apple.mpegurl');
 
-  const humanErr=(type,detail,info)=>{
-    const msg=info?.msg||info?.message||info?.reason||info?.code||'';
-    return [type,detail,msg].filter(Boolean).map(String).join(' · ').slice(0,180)
-  };
-
-  const tryNativeTs=(url,lastError)=>{
-    if(mpegPlayer){try{mpegPlayer.destroy()}catch{}mpegPlayer=null}
-    v.onerror=()=>{};
-    try{v.pause()}catch{}
-    v.removeAttribute('src');
-    try{v.load()}catch{}
-    v.src=url;
-    $('#pinfo').textContent=(x.cat||'')+' · native TS fallback';
-    v.play().catch(()=>{
-      const detail=lastError||'unknown TS error';
-      $('#pinfo').textContent=(x.cat||'')+' · '+detail;
-      toast('TS playback failed · '+detail)
-    })
-  };
-
   const startTs=()=>{
-    if(fallbackStarted&&tsAttempt>=2)return;
+    if(fallbackStarted)return;
     fallbackStarted=true;
-
     if(hls){try{hls.destroy()}catch{}hls=null}
-    if(mpegPlayer){try{mpegPlayer.destroy()}catch{}mpegPlayer=null}
     v.onerror=null;
     try{v.pause()}catch{}
     v.removeAttribute('src');
     try{v.load()}catch{}
 
-    const candidates=[tsUrl,hlsAsTsUrl];
-    const url=candidates[Math.min(tsAttempt,candidates.length-1)];
-    tsAttempt++;
-    $('#pinfo').textContent=(x.cat||'')+' · TS fallback '+tsAttempt;
-
     setTimeout(()=>{
+      setInfo('TS fallback');
       if(window.mpegts&&mpegts.isSupported()){
         try{
           mpegPlayer=mpegts.createPlayer(
-            {type:'mpegts',isLive:true,url},
-            {
-              enableWorker:false,
-              enableStashBuffer:false,
-              stashInitialSize:64,
-              lazyLoad:false,
-              autoCleanupSourceBuffer:true,
-              autoCleanupMaxBackwardDuration:12,
-              autoCleanupMinBackwardDuration:6
-            }
+            {type:'mpegts',isLive:true,url:tsUrl},
+            {enableWorker:true,enableStashBuffer:false,stashInitialSize:128,lazyLoad:false}
           );
           mpegPlayer.attachMediaElement(v);
           mpegPlayer.load();
-
-          mpegPlayer.on(mpegts.Events.ERROR,(errorType,errorDetail,errorInfo)=>{
-            const detail=humanErr(errorType,errorDetail,errorInfo);
-            try{mpegPlayer.destroy()}catch{}mpegPlayer=null;
-
-            if(tsAttempt<2){
-              toast('TS mode '+tsAttempt+' failed — trying alternate Xtream output…');
-              setTimeout(startTs,700);
-            }else{
-              const lower=detail.toLowerCase();
-              if(lower.includes('hevc')||lower.includes('h265')||lower.includes('h.265')){
-                $('#pinfo').textContent=(x.cat||'')+' · HEVC/H.265 browser decode unsupported';
-                toast('Channel uses HEVC/H.265 that this browser player cannot decode.')
-              }else{
-                tryNativeTs(url,detail||'exception')
-              }
-            }
+          mpegPlayer.on(mpegts.Events.ERROR,(type,detail,info)=>{
+            const parts=[type,detail,info&&info.code,info&&info.msg,info&&info.reason].filter(Boolean).map(String);
+            const message='TS playback failed · '+parts.join(' · ');
+            toast(message);
+            runDiagnostics(message);
           });
-
           mpegPlayer.play().catch(e=>{
-            const detail=e?.message||String(e||'play rejected');
-            if(tsAttempt<2)setTimeout(startTs,700);
-            else tryNativeTs(url,detail)
+            const message='TS play rejected · '+(e&&e.message?e.message:String(e||'unknown'));
+            toast(message);runDiagnostics(message);
           });
           return
         }catch(e){
-          const detail=e?.message||String(e||'mpegts exception');
-          if(tsAttempt<2)setTimeout(startTs,700);
-          else tryNativeTs(url,detail)
+          const message='TS player exception · '+(e&&e.message?e.message:String(e));
+          toast(message);runDiagnostics(message);
         }
       }
-      tryNativeTs(url,'mpegts.js is not supported')
-    },700)
+
+      v.src=tsUrl;
+      v.onerror=()=>{
+        const message='Native TS playback failed';
+        toast(message);runDiagnostics(message);
+      };
+      v.play().catch(e=>{
+        const message='TS unsupported · '+(e&&e.message?e.message:String(e||'unknown'));
+        toast(message);runDiagnostics(message);
+      });
+    },900)
   };
 
   const startHls=()=>{
-    $('#pinfo').textContent=(x.cat||'')+' · HLS';
+    setInfo('HLS');
     if(nativeHls){
       v.src=hlsUrl;
-      v.onerror=()=>{ if(hasTs)startTs(); else toast('HLS stream failed.') };
+      v.onerror=()=>{
+        if(hasTs)startTs();
+        else{const message='Native HLS failed';toast(message);runDiagnostics(message)}
+      };
       v.play().catch(()=>{});
       return
     }
 
     if(window.Hls&&Hls.isSupported()){
-      hls=new Hls({
-        enableWorker:true,
-        lowLatencyMode:false,
-        maxBufferLength:20,
-        backBufferLength:10
-      });
+      hls=new Hls({enableWorker:true,lowLatencyMode:false,maxBufferLength:20,backBufferLength:10});
       hls.on(Hls.Events.ERROR,(ev,data)=>{
         if(data.fatal){
-          const detail=String(data.details||data.type||'HLS error');
-          try{hls.destroy()}catch{}hls=null;
-          if(hasTs){
-            toast('HLS failed · '+detail+' — trying TS…');
-            setTimeout(startTs,500)
-          }else{
-            $('#pinfo').textContent=(x.cat||'')+' · '+detail;
-            toast('HLS stream failed · '+detail)
-          }
+          const message='HLS failed · '+[data.type,data.details,data.response&&data.response.code].filter(Boolean).join(' · ');
+          if(hasTs)startTs();
+          else{toast(message);runDiagnostics(message)}
         }
       });
       hls.loadSource(hlsUrl);
@@ -380,7 +344,7 @@ async function play(x){
     }
 
     if(hasTs)startTs();
-    else toast('HLS is not supported by this browser.')
+    else{const message='HLS unsupported by this browser';toast(message);runDiagnostics(message)}
   };
 
   if(hasHls)startHls();
@@ -501,7 +465,15 @@ async function probeOne(target){
   }finally{clearTimeout(timer)}
 }
 
-export default{async fetch(req,env){const u=new URL(req.url),p=u.pathname;if(p==='/'||p==='/index.html')return new Response(HTML,{headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store'}});if(p==='/api/login'&&req.method==='POST'){let b;try{b=await req.json()}catch{return json({error:'Invalid request'},400)}const server=clean(b.server),username=String(b.username||'').trim(),password=String(b.password||''),remember=!!b.remember;if(!server||!username||!password)return json({error:'Server, username and password are required.'},400);try{safe(server);const d=await getj(apiurl({server,username,password}));if(!d?.user_info||String(d.user_info.auth??'0')!=='1')return json({error:'Xtream username or password is not accepted.'},401);const payload={server,username,password,user_info:{username:d.user_info.username||username,status:d.user_info.status||'',exp_date:d.user_info.exp_date||'',allowed_output_formats:Array.isArray(d.user_info.allowed_output_formats)?d.user_info.allowed_output_formats:[],max_connections:d.user_info.max_connections||'',active_cons:d.user_info.active_cons||''},exp:Date.now()+(remember?30:0.5)*86400000};const tok=await makeSession(env,payload);let c='mx_session='+tok+'; Path=/; HttpOnly; Secure; SameSite=Lax';if(remember)c+='; Max-Age=2592000';return json({ok:true,user_info:payload.user_info},200,{'set-cookie':c})}catch(e){return json({error:e.name==='AbortError'?'Xtream server timed out.':e.message},502)}}if(p==='/api/logout'&&req.method==='POST')return json({ok:true},200,{'set-cookie':'mx_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'});const s=await session(req,env);if(p==='/api/session'){if(!s)return json({ok:false},401);return json({ok:true,server:s.server,username:s.username,user_info:s.user_info})}if(!s)return json({error:'Session expired. Please login again.'},401);if(p==='/api/action'){const a=u.searchParams.get('action')||'',allow=new Set(['get_live_categories','get_live_streams','get_vod_categories','get_vod_streams','get_series_categories','get_series','get_series_info','get_short_epg','get_simple_data_table']);if(!allow.has(a))return json({error:'Unsupported action'},400);const params={};for(const k of ['category_id','series_id','stream_id','epg_limit']){const v=u.searchParams.get(k);if(v!==null&&v!=='')params[k]=v}try{return json(await getj(apiurl(s,a,params)))}catch(e){return json({error:e.message},502)}}if(p==='/api/probe-live'){
+export default{async fetch(req,env){const u=new URL(req.url),p=u.pathname;if(p==='/'||p==='/index.html')return new Response(HTML,{headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store'}});if(p==='/api/login'&&req.method==='POST'){let b;try{b=await req.json()}catch{return json({error:'Invalid request'},400)}const server=clean(b.server),username=String(b.username||'').trim(),password=String(b.password||''),remember=!!b.remember;if(!server||!username||!password)return json({error:'Server, username and password are required.'},400);try{safe(server);const d=await getj(apiurl({server,username,password}));if(!d?.user_info||String(d.user_info.auth??'0')!=='1')return json({error:'Xtream username or password is not accepted.'},401);const payload={server,username,password,user_info:{username:d.user_info.username||username,status:d.user_info.status||'',exp_date:d.user_info.exp_date||'',allowed_output_formats:Array.isArray(d.user_info.allowed_output_formats)?d.user_info.allowed_output_formats:[],max_connections:d.user_info.max_connections||'',active_cons:d.user_info.active_cons||''},exp:Date.now()+(remember?30:0.5)*86400000};const tok=await makeSession(env,payload);let c='mx_session='+tok+'; Path=/; HttpOnly; Secure; SameSite=Lax';if(remember)c+='; Max-Age=2592000';return json({ok:true,user_info:payload.user_info},200,{'set-cookie':c})}catch(e){return json({error:e.name==='AbortError'?'Xtream server timed out.':e.message},502)}}if(p==='/api/logout'&&req.method==='POST')return json({ok:true},200,{'set-cookie':'mx_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'});const s=await session(req,env);if(p==='/api/session'){if(!s)return json({ok:false},401);return json({ok:true,server:s.server,username:s.username,user_info:s.user_info})}if(!s)return json({error:'Session expired. Please login again.'},401);if(p==='/api/action'){const a=u.searchParams.get('action')||'',allow=new Set(['get_live_categories','get_live_streams','get_vod_categories','get_vod_streams','get_series_categories','get_series','get_series_info','get_short_epg','get_simple_data_table']);if(!allow.has(a))return json({error:'Unsupported action'},400);const params={};for(const k of ['category_id','series_id','stream_id','epg_limit']){const v=u.searchParams.get(k);if(v!==null&&v!=='')params[k]=v}try{return json(await getj(apiurl(s,a,params)))}catch(e){return json({error:e.message},502)}}if(p==='/api/debug-live'){
+    const id=u.searchParams.get('id')||'';
+    if(!/^\d+$/.test(id))return json({error:'Invalid stream id'},400);
+    const base=clean(s.server)+'/live/'+encodeURIComponent(s.username)+'/'+encodeURIComponent(s.password)+'/'+id;
+    const result={account:{allowed_output_formats:s.user_info?.allowed_output_formats||[],max_connections:s.user_info?.max_connections||'',active_cons:s.user_info?.active_cons||''},hls:null,ts:null};
+    try{result.hls=await probeOne(base+'.m3u8')}catch(e){result.hls={ok:false,error:e.name+': '+e.message}}
+    try{result.ts=await probeOne(base+'.ts')}catch(e){result.ts={ok:false,error:e.name+': '+e.message}}
+    return json(result)
+  }if(p==='/api/probe-live'){
     const id=u.searchParams.get('id')||'';
     if(!/^\d+$/.test(id))return json({error:'Invalid stream id'},400);
     const base=clean(s.server)+'/live/'+encodeURIComponent(s.username)+'/'+encodeURIComponent(s.password)+'/'+id;
