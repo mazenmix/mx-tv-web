@@ -9,17 +9,19 @@ const HTML=String.raw`<!doctype html><html><head><meta charset="utf-8"><meta nam
 <div class="player hidden" id="player"><div class="playerbox"><div class="playtop"><div><div class="kicker">NOW PLAYING</div><strong id="ptitle">Channel</strong></div><button class="round" id="close">✕</button></div><video id="video" controls autoplay playsinline></video><div class="pinfo" id="pinfo"></div></div></div><div class="toast" id="toast"></div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.18/dist/hls.min.js"></script><script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script><script>
 const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>[...r.querySelectorAll(s)];
-const KEY='mxtv_profiles_worker',FAV='mxtv_favs_worker';
+const KEY='mxtv_profiles_worker',FAV='mxtv_favs_worker_v2';
 let hls=null,mpegPlayer=null,filterTimer=null;
 const state={
-  view:'home',cat:'all',query:'',limit:80,src:null,
-  data:{live:[],movies:[],series:[]},
+  view:'home',query:'',limit:80,src:null,loading:false,error:'',
   cats:{live:[],movies:[],series:[]},
+  selected:{live:null,movies:null,series:null},
+  loaded:{live:null,movies:null,series:null},
+  data:{live:[],movies:[],series:[]},
   favorites:JSON.parse(localStorage.getItem(FAV)||'[]')
 };
 
 function esc(v=''){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-function toast(t){const x=$('#toast');x.textContent=t;x.classList.add('show');clearTimeout(window.__mxToast);window.__mxToast=setTimeout(()=>x.classList.remove('show'),2200)}
+function toast(t){const x=$('#toast');x.textContent=t;x.classList.add('show');clearTimeout(window.__mxToast);window.__mxToast=setTimeout(()=>x.classList.remove('show'),2400)}
 function profiles(){try{return JSON.parse(localStorage.getItem(KEY)||'[]')}catch{return[]}}
 function saveProfiles(a){localStorage.setItem(KEY,JSON.stringify(a.slice(0,12)))}
 function refreshHistory(){
@@ -33,10 +35,57 @@ $('#eye').onclick=e=>{e.preventDefault();$('#pass').type=$('#pass').type==='pass
 
 async function req(url,opt){
   const r=await fetch(url,opt);
-  let d;try{d=await r.json()}catch{d={error:'Invalid response'}};
-  if(!r.ok)throw Error(d.error||('HTTP '+r.status));
+  const text=await r.text();
+  let d=null;
+  try{d=JSON.parse(text)}catch{
+    throw Error('Backend returned '+r.status+' instead of JSON'+(text?': '+text.replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim().slice(0,140):''))
+  }
+  if(!r.ok)throw Error(d?.error||('HTTP '+r.status));
   return d
 }
+async function action(a,params={}){
+  const q=new URLSearchParams({action:a});
+  for(const [k,v] of Object.entries(params))if(v!==undefined&&v!==null&&v!=='')q.set(k,v);
+  return req('/api/action?'+q.toString())
+}
+function catName(kind,id){
+  return state.cats[kind].find(c=>String(c.id)===String(id))?.name || (kind==='live'?'Live':kind==='movies'?'Movies':'Series')
+}
+
+async function loadMeta(){
+  const [lc,vc,sc]=await Promise.all([
+    action('get_live_categories'),action('get_vod_categories'),action('get_series_categories')
+  ]);
+  const norm=a=>(Array.isArray(a)?a:[]).map(x=>({id:String(x.category_id),name:x.category_name||'Category'}));
+  state.cats.live=norm(lc);state.cats.movies=norm(vc);state.cats.series=norm(sc);
+  for(const k of ['live','movies','series']){
+    if(!state.selected[k]&&state.cats[k][0])state.selected[k]=state.cats[k][0].id
+  }
+}
+
+async function loadCategory(kind,catId){
+  if(!catId){state.data[kind]=[];state.loaded[kind]=null;return}
+  state.loading=true;state.error='';render();
+  try{
+    const map={live:'get_live_streams',movies:'get_vod_streams',series:'get_series'};
+    const raw=await action(map[kind],{category_id:catId});
+    const a=Array.isArray(raw)?raw:[];
+    const cname=catName(kind,catId);
+    if(kind==='live'){
+      state.data.live=a.map(x=>({id:'l'+x.stream_id,streamId:x.stream_id,name:x.name||'Channel',cat:cname,logo:x.stream_icon||'',url:'/live/'+x.stream_id+'.m3u8'}))
+    }else if(kind==='movies'){
+      state.data.movies=a.map(x=>({id:'m'+x.stream_id,streamId:x.stream_id,name:x.name||'Movie',cat:cname,logo:x.stream_icon||'',url:'/movie/'+x.stream_id+'.'+(x.container_extension||'mp4')}))
+    }else{
+      state.data.series=a.map(x=>({id:'s'+x.series_id,seriesId:x.series_id,name:x.name||'Series',cat:cname,logo:x.cover||'',url:''}))
+    }
+    state.loaded[kind]=String(catId);state.limit=80
+  }catch(e){
+    state.error=e.message||'Could not load this category.'
+  }finally{
+    state.loading=false;render()
+  }
+}
+
 async function connect(){
   const server=$('#server').value.trim().replace(/\/+$/,''),username=$('#user').value.trim(),password=$('#pass').value,remember=$('#remember').checked;
   if(!server||!username||!password){$('#err').textContent='Enter server URL, username and password.';return}
@@ -48,65 +97,43 @@ async function connect(){
       let a=profiles().filter(x=>!(x.server===server&&x.username===username));
       a.unshift({server,username});saveProfiles(a);refreshHistory()
     }
-    await loadAll();
+    b.textContent='Loading categories…';
+    await loadMeta();
     $('#login').classList.add('hidden');$('#app').classList.remove('hidden');
-    state.view='home';state.cat='all';state.query='';state.limit=80;
-    render();toast('Connected to MX TV')
+    state.view='home';render();toast('Connected to MX TV')
   }catch(e){$('#err').textContent=e.message}
   finally{b.disabled=false;b.textContent='Connect to MX TV'}
 }
 $('#connect').onclick=connect;
 ['server','user','pass'].forEach(id=>$('#'+id).addEventListener('keydown',e=>{if(e.key==='Enter')connect()}));
 
-async function action(a){return req('/api/action?action='+encodeURIComponent(a))}
-async function loadAll(){
-  const [lc,ls,vc,vs,sc,ss]=await Promise.all([
-    action('get_live_categories'),action('get_live_streams'),
-    action('get_vod_categories'),action('get_vod_streams'),
-    action('get_series_categories'),action('get_series')
-  ]);
-  const lca=Array.isArray(lc)?lc:[],lsa=Array.isArray(ls)?ls:[],
-        vca=Array.isArray(vc)?vc:[],vsa=Array.isArray(vs)?vs:[],
-        sca=Array.isArray(sc)?sc:[],ssa=Array.isArray(ss)?ss:[];
-  const lm=Object.fromEntries(lca.map(x=>[String(x.category_id),x.category_name])),
-        vm=Object.fromEntries(vca.map(x=>[String(x.category_id),x.category_name])),
-        sm=Object.fromEntries(sca.map(x=>[String(x.category_id),x.category_name]));
-  state.cats.live=lca.map(x=>x.category_name).filter(Boolean);
-  state.cats.movies=vca.map(x=>x.category_name).filter(Boolean);
-  state.cats.series=sca.map(x=>x.category_name).filter(Boolean);
-  state.data.live=lsa.map(x=>({id:'l'+x.stream_id,streamId:x.stream_id,name:x.name||'Channel',cat:lm[String(x.category_id)]||'Live',logo:x.stream_icon||'',url:'/live/'+x.stream_id+'.m3u8'}));
-  state.data.movies=vsa.map(x=>({id:'m'+x.stream_id,name:x.name||'Movie',cat:vm[String(x.category_id)]||'Movies',logo:x.stream_icon||'',url:'/movie/'+x.stream_id+'.'+(x.container_extension||'mp4')}));
-  state.data.series=ssa.map(x=>({id:'s'+x.series_id,name:x.name||'Series',cat:sm[String(x.category_id)]||'Series',logo:x.cover||'',url:''}))
-}
-
 function clock(){try{$('#clock').textContent=new Intl.DateTimeFormat(undefined,{weekday:'short',hour:'2-digit',minute:'2-digit'}).format(new Date())}catch{}}
 setInterval(clock,1000);clock();
-
 const side=$('#side'),content=$('#content');
-function view(v){
-  state.view=v;state.cat='all';state.query='';state.limit=80;
+
+async function view(v){
+  state.view=v;state.query='';state.limit=80;state.error='';
   $$('.navbtn[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===v));
-  side.classList.remove('open');render()
+  side.classList.remove('open');
+  render();
+  if(['live','movies','series'].includes(v)){
+    const id=state.selected[v];
+    if(id&&String(state.loaded[v])!==String(id))await loadCategory(v,id)
+  }
 }
 $$('.navbtn[data-view]').forEach(b=>b.onclick=()=>view(b.dataset.view));
 $('#menu').onclick=()=>side.classList.toggle('open');
 $('#quick').onclick=()=>view('search');
 
-function dataFor(kind){return state.data[kind]||[]}
 function item(id){
   id=String(id||'');
-  const arr=id.startsWith('l')?state.data.live:id.startsWith('m')?state.data.movies:id.startsWith('s')?state.data.series:null;
-  return arr?arr.find(x=>String(x.id)===id):null
+  const arr=id.startsWith('l')?state.data.live:id.startsWith('m')?state.data.movies:id.startsWith('s')?state.data.series:[];
+  return arr.find(x=>String(x.id)===id)||state.favorites.find(x=>String(x.id)===id)||null
 }
-function favoriteItems(){
-  const out=[];
-  for(const id of state.favorites){const x=item(id);if(x)out.push(x)}
-  return out
-}
-function fav(id){return state.favorites.includes(String(id))}
+function fav(id){return state.favorites.some(x=>String(x.id)===String(id))}
 function toggle(id){
-  id=String(id);
-  state.favorites=fav(id)?state.favorites.filter(x=>x!==id):[...state.favorites,id];
+  const x=item(id);if(!x)return;
+  state.favorites=fav(id)?state.favorites.filter(f=>String(f.id)!==String(id)):[...state.favorites,{...x}];
   localStorage.setItem(FAV,JSON.stringify(state.favorites));render()
 }
 function icon(n){
@@ -119,40 +146,39 @@ function tile(x,t='live'){
 function row(x){
   return '<div class="row" data-play="'+esc(x.id)+'"><img loading="lazy" src="'+(x.logo||icon(x.name))+'"><div><b>'+esc(x.name)+'</b><small>'+esc(x.cat||'')+'</small></div><button class="star '+(fav(x.id)?'on':'')+'" data-fav="'+esc(x.id)+'">★</button></div>'
 }
+
 function home(){
   const u=state.src?.username||'';
-  return '<div class="hero"><div class="herocopy"><span class="badge">'+(u?'CONNECTED • '+esc(u):'MX TV WEB')+'</span><h2>Your TV.<br>Beautifully simple.</h2><p>Live channels, movies, series and favorites in a premium interface built for every screen.</p><div class="actions"><button class="btn primary" data-jump="live">▶ Watch Live</button><button class="btn" data-jump="favorites">★ Favorites</button></div></div></div>'+
-    '<div class="kpis"><div class="kpi"><b>'+state.data.live.length.toLocaleString()+'</b><span>Live Channels</span></div><div class="kpi"><b>'+state.data.movies.length.toLocaleString()+'</b><span>Movies</span></div><div class="kpi"><b>'+state.data.series.length.toLocaleString()+'</b><span>Series</span></div><div class="kpi"><b>'+state.favorites.length.toLocaleString()+'</b><span>Favorites</span></div></div>'+
-    '<div class="sectionhead"><h3>Live Now</h3></div><div class="grid">'+state.data.live.slice(0,12).map(x=>tile(x)).join('')+'</div>'
+  const catTotal=state.cats.live.length+state.cats.movies.length+state.cats.series.length;
+  return '<div class="hero"><div class="herocopy"><span class="badge">'+(u?'CONNECTED • '+esc(u):'MX TV WEB')+'</span><h2>Your TV.<br>Beautifully simple.</h2><p>Your library is loaded on demand, category by category, for maximum speed and stability on large IPTV accounts.</p><div class="actions"><button class="btn primary" data-jump="live">▶ Live TV</button><button class="btn" data-jump="movies">▶ Movies</button><button class="btn" data-jump="series">▣ Series</button></div></div></div>'+
+  '<div class="kpis"><div class="kpi"><b>'+state.cats.live.length.toLocaleString()+'</b><span>Live Categories</span></div><div class="kpi"><b>'+state.cats.movies.length.toLocaleString()+'</b><span>Movie Categories</span></div><div class="kpi"><b>'+state.cats.series.length.toLocaleString()+'</b><span>Series Categories</span></div><div class="kpi"><b>'+state.favorites.length.toLocaleString()+'</b><span>Favorites</span></div></div>'+
+  '<div class="sectionhead"><h3>Ready</h3></div><div class="settings"><div style="color:#aab4c3;line-height:1.7">Choose <b>Live TV</b>, <b>Movies</b> or <b>Series</b>. MX TV will only download the category you open instead of loading the entire '+catTotal.toLocaleString()+'-category library at login.</div></div>'
 }
+
 function list(kind,label){
-  let a=kind==='favorites'?favoriteItems():dataFor(kind);
-  const cats=kind==='favorites'?[...new Set(a.map(x=>x.cat).filter(Boolean))]:(state.cats[kind]||[]);
-  if(state.cat!=='all')a=a.filter(x=>x.cat===state.cat);
+  const cats=state.cats[kind]||[];
+  let a=state.data[kind]||[];
   if(state.query){
     const q=state.query.toLowerCase();
-    a=a.filter(x=>(x.name||'').toLowerCase().includes(q)||(x.cat||'').toLowerCase().includes(q))
+    a=a.filter(x=>(x.name||'').toLowerCase().includes(q))
   }
-  const total=a.length,visible=a.slice(0,state.limit);
-  const mobileSelect='<select id="catSelect" class="search" style="max-width:240px"><option value="all">All Categories</option>'+cats.map(c=>'<option value="'+esc(c)+'" '+(state.cat===c?'selected':'')+'>'+esc(c)+'</option>').join('')+'</select>';
-  const more=total>visible.length?'<div style="padding:14px;text-align:center"><button class="btn" id="more">Load more · '+visible.length.toLocaleString()+' / '+total.toLocaleString()+'</button></div>':'';
-  return '<div class="split"><div class="panel"><div class="ptitle">'+label+' Categories</div><div class="cats"><button class="cat '+(state.cat==='all'?'active':'')+'" data-cat="all">All</button>'+cats.map(c=>'<button class="cat '+(state.cat===c?'active':'')+'" data-cat="'+esc(c)+'">'+esc(c)+'</button>').join('')+'</div></div>'+
-    '<div class="panel"><div class="toolbar" style="display:flex;gap:10px;flex-wrap:wrap"><input class="search" id="filter" value="'+esc(state.query)+'" placeholder="Search '+label.toLowerCase()+'..." style="flex:1;min-width:180px">'+mobileSelect+'</div>'+
-    '<div style="padding:9px 16px;color:#8d99aa;font-size:12px">Showing '+visible.length.toLocaleString()+' of '+total.toLocaleString()+'</div>'+
-    '<div class="rows">'+(visible.map(row).join('')||'<div class="empty">Nothing here yet.</div>')+'</div>'+more+'</div></div>'
+  const visible=a.slice(0,state.limit);
+  return '<div class="split"><div class="panel"><div class="ptitle">'+label+' Categories</div><div class="cats">'+cats.map(c=>'<button class="cat '+(String(state.selected[kind])===String(c.id)?'active':'')+'" data-kind="'+kind+'" data-catid="'+esc(c.id)+'">'+esc(c.name)+'</button>').join('')+'</div></div>'+
+  '<div class="panel"><div class="toolbar"><input class="search" id="filter" value="'+esc(state.query)+'" placeholder="Search this category..."></div>'+
+  (state.loading?'<div class="empty">Loading '+esc(catName(kind,state.selected[kind]))+'…</div>':
+   state.error?'<div class="empty" style="color:#ff8797">'+esc(state.error)+'</div>':
+   '<div style="padding:9px 16px;color:#8d99aa;font-size:12px">'+esc(catName(kind,state.selected[kind]))+' · '+a.length.toLocaleString()+' items</div><div class="rows">'+(visible.map(row).join('')||'<div class="empty">No items in this category.</div>')+'</div>'+
+   (a.length>visible.length?'<div style="padding:14px;text-align:center"><button class="btn" id="more">Load more · '+visible.length.toLocaleString()+' / '+a.length.toLocaleString()+'</button></div>':''))+
+  '</div></div>'
 }
-function searchMatches(q,limit=80){
-  q=(q||'').trim().toLowerCase();if(!q)return[];
-  const out=[];
-  for(const arr of [state.data.live,state.data.movies,state.data.series]){
-    for(const x of arr){
-      if((x.name||'').toLowerCase().includes(q)||(x.cat||'').toLowerCase().includes(q)){out.push(x);if(out.length>=limit)return out}
-    }
-  }
-  return out
+function favoritesPage(){
+  let a=state.favorites||[];
+  if(state.query){const q=state.query.toLowerCase();a=a.filter(x=>(x.name||'').toLowerCase().includes(q))}
+  return '<div class="settings"><h3>Favorites</h3><input class="search" id="filter" value="'+esc(state.query)+'" placeholder="Search favorites..."><div class="rows">'+(a.map(row).join('')||'<div class="empty">No favorites yet.</div>')+'</div></div>'
 }
 function searchPage(){
-  return '<div class="settings"><h3>Search everything</h3><input class="search" id="gsearch" placeholder="Channel, movie or series name..."><div style="padding:10px 0;color:#8d99aa;font-size:12px">Searches all loaded Live TV, Movies and Series without rendering the full library.</div><div class="rows" id="results"><div class="empty">Start typing to search.</div></div></div>'
+  const loaded=[...state.data.live,...state.data.movies,...state.data.series,...state.favorites];
+  return '<div class="settings"><h3>Search loaded content</h3><input class="search" id="gsearch" placeholder="Search recently loaded channels, movies or series..."><div style="padding:10px 0;color:#8d99aa;font-size:12px">For stability, global search covers categories you have opened plus Favorites.</div><div class="rows" id="results"><div class="empty">Start typing to search.</div></div></div>'
 }
 function settings(){
   return '<div class="settings"><h3>Account & Device</h3><div class="account"><div><b>'+esc(state.src?.username||'')+'</b><span>'+esc(state.src?.server||'')+'</span></div><div class="actions" style="margin:0"><button class="btn" id="switch">Switch Server</button><button class="btn danger" id="logout">Logout</button></div></div></div>'
@@ -162,109 +188,77 @@ function render(){
   $('#title').textContent=n[state.view]||'MX TV';
   content.innerHTML=state.view==='home'?home():
     state.view==='live'?list('live','Live TV'):
-    state.view==='favorites'?list('favorites','Favorites'):
     state.view==='movies'?list('movies','Movies'):
     state.view==='series'?list('series','Series'):
+    state.view==='favorites'?favoritesPage():
     state.view==='search'?searchPage():settings();
   bind()
 }
 function bind(){
   $$('[data-jump]').forEach(b=>b.onclick=()=>view(b.dataset.jump));
   $$('[data-fav]').forEach(b=>b.onclick=e=>{e.stopPropagation();toggle(b.dataset.fav)});
-  $$('[data-cat]').forEach(b=>b.onclick=()=>{state.cat=b.dataset.cat;state.query='';state.limit=80;render()});
   $$('[data-play]').forEach(x=>x.onclick=e=>{if(!e.target.closest('[data-fav]'))play(item(x.dataset.play))});
-  const cs=$('#catSelect');if(cs)cs.onchange=()=>{state.cat=cs.value;state.query='';state.limit=80;render()};
+  $$('[data-catid]').forEach(b=>b.onclick=async()=>{
+    const kind=b.dataset.kind,id=b.dataset.catid;
+    state.selected[kind]=id;state.query='';state.limit=80;
+    await loadCategory(kind,id)
+  });
   const more=$('#more');if(more)more.onclick=()=>{state.limit+=80;render()};
   const f=$('#filter');
   if(f)f.oninput=()=>{
-    const value=f.value, pos=f.selectionStart;
+    const val=f.value,pos=f.selectionStart;
     clearTimeout(filterTimer);
-    filterTimer=setTimeout(()=>{
-      state.query=value;state.limit=80;render();
-      const nf=$('#filter');if(nf){nf.focus();try{nf.setSelectionRange(pos,pos)}catch{}}
-    },180)
+    filterTimer=setTimeout(()=>{state.query=val;state.limit=80;render();const nf=$('#filter');if(nf){nf.focus();try{nf.setSelectionRange(pos,pos)}catch{}}},160)
   };
   const g=$('#gsearch');
   if(g)g.oninput=()=>{
-    const q=g.value;
-    clearTimeout(filterTimer);
-    filterTimer=setTimeout(()=>{
-      const a=searchMatches(q,80);
-      $('#results').innerHTML=q.trim()?(a.map(row).join('')||'<div class="empty">No results.</div>'):'<div class="empty">Start typing to search.</div>';
-      $$('[data-play]',$('#results')).forEach(x=>x.onclick=e=>{if(!e.target.closest('[data-fav]'))play(item(x.dataset.play))});
-      $$('[data-fav]',$('#results')).forEach(b=>b.onclick=e=>{e.stopPropagation();toggle(b.dataset.fav)})
-    },180)
+    const q=g.value.trim().toLowerCase();
+    const loaded=[...state.data.live,...state.data.movies,...state.data.series,...state.favorites];
+    const seen=new Set(),out=[];
+    if(q)for(const x of loaded){if(seen.has(x.id))continue;seen.add(x.id);if((x.name||'').toLowerCase().includes(q)){out.push(x);if(out.length>=80)break}}
+    $('#results').innerHTML=q?(out.map(row).join('')||'<div class="empty">No results in loaded categories.</div>'):'<div class="empty">Start typing to search.</div>';
+    $$('[data-play]',$('#results')).forEach(x=>x.onclick=e=>{if(!e.target.closest('[data-fav]'))play(item(x.dataset.play))});
+    $$('[data-fav]',$('#results')).forEach(b=>b.onclick=e=>{e.stopPropagation();toggle(b.dataset.fav)})
   };
   const sw=$('#switch');if(sw)sw.onclick=()=>{$('#app').classList.add('hidden');$('#login').classList.remove('hidden')};
   const lo=$('#logout');if(lo)lo.onclick=async()=>{await fetch('/api/logout',{method:'POST'});state.src=null;state.data={live:[],movies:[],series:[]};state.cats={live:[],movies:[],series:[]};$('#app').classList.add('hidden');$('#login').classList.remove('hidden')}
 }
+
 async function play(x){
   if(!x)return;
   if(!x.url){toast('Series episode browser is next.');return}
   $('#ptitle').textContent=x.name;$('#pinfo').textContent=x.cat||'';$('#player').classList.remove('hidden');
   const v=$('#video');
-
   if(hls){try{hls.destroy()}catch{}hls=null}
   if(mpegPlayer){try{mpegPlayer.destroy()}catch{}mpegPlayer=null}
   v.onerror=null;v.pause();v.removeAttribute('src');v.load();
 
   let mode='hls',playUrl=x.url,diag='';
   if(x.streamId){
-    try{
-      const p=await req('/api/probe-live?id='+encodeURIComponent(x.streamId));
-      mode=p.mode||'hls';playUrl=p.url||x.url;
-      diag=p.detail||'';
-    }catch(e){
-      diag=e.message||'probe failed';
-    }
+    try{const p=await req('/api/probe-live?id='+encodeURIComponent(x.streamId));mode=p.mode||'hls';playUrl=p.url||x.url;diag=p.detail||''}catch(e){diag=e.message||'probe failed'}
   }
-
   const nativeHls=!!v.canPlayType('application/vnd.apple.mpegurl');
-
   const startMpegTs=()=>{
     if(window.mpegts&&mpegts.isSupported()){
       try{
         mpegPlayer=mpegts.createPlayer({type:'mpegts',isLive:true,url:playUrl},{enableWorker:true,enableStashBuffer:false,stashInitialSize:128});
-        mpegPlayer.attachMediaElement(v);
-        mpegPlayer.load();
-        mpegPlayer.play().catch(()=>{});
+        mpegPlayer.attachMediaElement(v);mpegPlayer.load();mpegPlayer.play().catch(()=>{});
         mpegPlayer.on(mpegts.Events.ERROR,()=>toast('This MPEG-TS stream could not play on this device.'));
         return true
       }catch{}
     }
     return false
   };
-
-  if(mode==='ts'){
-    if(!startMpegTs()){
-      v.src=playUrl;
-      v.play().catch(()=>toast('This channel is MPEG-TS and this browser could not decode it.'));
-    }
-    return
-  }
-
+  if(mode==='ts'){if(!startMpegTs()){v.src=playUrl;v.play().catch(()=>toast('This MPEG-TS channel could not play.'))}return}
   if(nativeHls){
     v.src=playUrl;
-    v.onerror=()=>{
-      if(startMpegTs())toast('HLS failed — switched to MPEG-TS fallback.');
-      else toast('Stream failed'+(diag?' · '+diag:''));
-    };
-    v.play().catch(()=>{});
+    v.onerror=()=>{if(startMpegTs())toast('HLS failed — switched to MPEG-TS fallback.');else toast('Stream failed'+(diag?' · '+diag:''))};
+    v.play().catch(()=>{})
   }else if(window.Hls&&Hls.isSupported()){
     hls=new Hls({enableWorker:true,lowLatencyMode:false,maxBufferLength:20,backBufferLength:10});
-    hls.on(Hls.Events.ERROR,(ev,data)=>{
-      if(data.fatal){
-        try{hls.destroy()}catch{}hls=null;
-        if(startMpegTs())toast('HLS failed — switched to MPEG-TS fallback.');
-        else toast('Stream failed'+(diag?' · '+diag:''));
-      }
-    });
-    hls.loadSource(playUrl);hls.attachMedia(v);
-    hls.on(Hls.Events.MANIFEST_PARSED,()=>v.play().catch(()=>{}))
-  }else{
-    v.src=playUrl;
-    v.play().catch(()=>toast('This stream format is not supported by this browser.'))
-  }
+    hls.on(Hls.Events.ERROR,(ev,data)=>{if(data.fatal){try{hls.destroy()}catch{}hls=null;if(startMpegTs())toast('HLS failed — switched to MPEG-TS fallback.');else toast('Stream failed'+(diag?' · '+diag:''))}});
+    hls.loadSource(playUrl);hls.attachMedia(v);hls.on(Hls.Events.MANIFEST_PARSED,()=>v.play().catch(()=>{}))
+  }else{v.src=playUrl;v.play().catch(()=>toast('This stream format is not supported by this browser.'))}
 }
 $('#close').onclick=()=>{$('#player').classList.add('hidden');$('#video').pause();if(hls){try{hls.destroy()}catch{}hls=null}if(mpegPlayer){try{mpegPlayer.destroy()}catch{}mpegPlayer=null}};
 $('#player').onclick=e=>{if(e.target.id==='player')$('#close').click()};
@@ -274,9 +268,8 @@ async function boot(){
   try{
     const s=await req('/api/session');if(!s.ok)return;
     state.src={server:s.server,username:s.username,user_info:s.user_info};
-    await loadAll();
-    $('#login').classList.add('hidden');$('#app').classList.remove('hidden');
-    state.view='home';state.limit=80;render()
+    await loadMeta();
+    $('#login').classList.add('hidden');$('#app').classList.remove('hidden');state.view='home';render()
   }catch{}
 }
 boot();
@@ -294,7 +287,7 @@ function json(x,status=200,headers={}){return new Response(JSON.stringify(x),{st
 function clean(s){return String(s||'').trim().replace(/\/+$/,'')}
 function safe(raw){let u;try{u=new URL(raw)}catch{throw Error('Invalid server URL')}if(!['http:','https:'].includes(u.protocol))throw Error('Only HTTP/HTTPS servers are supported');const h=u.hostname.toLowerCase();if(h==='localhost'||h==='::1'||/^127\./.test(h)||/^10\./.test(h)||/^192\.168\./.test(h)||/^169\.254\./.test(h))throw Error('Private/local addresses are not supported');const m=h.match(/^172\.(\d+)\./);if(m&&+m[1]>=16&&+m[1]<=31)throw Error('Private/local addresses are not supported');return u}
 async function getj(url){const c=new AbortController(),t=setTimeout(()=>c.abort(),15000);try{const r=await fetch(url,{redirect:'follow',signal:c.signal,headers:{'user-agent':'MX-TV-Web/1.0'}});const tx=await r.text();let d;try{d=JSON.parse(tx)}catch{throw Error('Xtream server returned invalid data')}if(!r.ok)throw Error('Xtream server HTTP '+r.status);return d}finally{clearTimeout(t)}}
-function apiurl(s,a=''){const u=new URL(clean(s.server)+'/player_api.php');u.searchParams.set('username',s.username);u.searchParams.set('password',s.password);if(a)u.searchParams.set('action',a);return u.toString()}
+function apiurl(s,a='',params={}){const u=new URL(clean(s.server)+'/player_api.php');u.searchParams.set('username',s.username);u.searchParams.set('password',s.password);if(a)u.searchParams.set('action',a);for(const [k,v] of Object.entries(params)){if(v!==undefined&&v!==null&&v!=='')u.searchParams.set(k,String(v))}return u.toString()}
 async function proxysign(env,url){return sign(env,url)}
 async function rewrite(env,text,base){const out=[];for(let line of text.split(/\r?\n/)){if(!line){out.push(line);continue}if(line.startsWith('#')){const m=line.match(/URI="([^"]+)"/);if(m){const abs=new URL(m[1],base).toString(),sg=await proxysign(env,abs);line=line.replace(m[1],'/proxy?u='+encodeURIComponent(abs)+'&s='+encodeURIComponent(sg))}out.push(line)}else{const abs=new URL(line,base).toString(),sg=await proxysign(env,abs);out.push('/proxy?u='+encodeURIComponent(abs)+'&s='+encodeURIComponent(sg))}}return out.join('\n')}
 async function media(req,env,target){
@@ -346,7 +339,7 @@ async function probeOne(target){
   }finally{clearTimeout(timer)}
 }
 
-export default{async fetch(req,env){const u=new URL(req.url),p=u.pathname;if(p==='/'||p==='/index.html')return new Response(HTML,{headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store'}});if(p==='/api/login'&&req.method==='POST'){let b;try{b=await req.json()}catch{return json({error:'Invalid request'},400)}const server=clean(b.server),username=String(b.username||'').trim(),password=String(b.password||''),remember=!!b.remember;if(!server||!username||!password)return json({error:'Server, username and password are required.'},400);try{safe(server);const d=await getj(apiurl({server,username,password}));if(!d?.user_info||String(d.user_info.auth??'0')!=='1')return json({error:'Xtream username or password is not accepted.'},401);const payload={server,username,password,user_info:{username:d.user_info.username||username,status:d.user_info.status||'',exp_date:d.user_info.exp_date||''},exp:Date.now()+(remember?30:0.5)*86400000};const tok=await makeSession(env,payload);let c='mx_session='+tok+'; Path=/; HttpOnly; Secure; SameSite=Lax';if(remember)c+='; Max-Age=2592000';return json({ok:true,user_info:payload.user_info},200,{'set-cookie':c})}catch(e){return json({error:e.name==='AbortError'?'Xtream server timed out.':e.message},502)}}if(p==='/api/logout'&&req.method==='POST')return json({ok:true},200,{'set-cookie':'mx_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'});const s=await session(req,env);if(p==='/api/session'){if(!s)return json({ok:false},401);return json({ok:true,server:s.server,username:s.username,user_info:s.user_info})}if(!s)return json({error:'Session expired. Please login again.'},401);if(p==='/api/action'){const a=u.searchParams.get('action')||'',allow=new Set(['get_live_categories','get_live_streams','get_vod_categories','get_vod_streams','get_series_categories','get_series']);if(!allow.has(a))return json({error:'Unsupported action'},400);try{return json(await getj(apiurl(s,a)))}catch(e){return json({error:e.message},502)}}if(p==='/api/probe-live'){
+export default{async fetch(req,env){const u=new URL(req.url),p=u.pathname;if(p==='/'||p==='/index.html')return new Response(HTML,{headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store'}});if(p==='/api/login'&&req.method==='POST'){let b;try{b=await req.json()}catch{return json({error:'Invalid request'},400)}const server=clean(b.server),username=String(b.username||'').trim(),password=String(b.password||''),remember=!!b.remember;if(!server||!username||!password)return json({error:'Server, username and password are required.'},400);try{safe(server);const d=await getj(apiurl({server,username,password}));if(!d?.user_info||String(d.user_info.auth??'0')!=='1')return json({error:'Xtream username or password is not accepted.'},401);const payload={server,username,password,user_info:{username:d.user_info.username||username,status:d.user_info.status||'',exp_date:d.user_info.exp_date||''},exp:Date.now()+(remember?30:0.5)*86400000};const tok=await makeSession(env,payload);let c='mx_session='+tok+'; Path=/; HttpOnly; Secure; SameSite=Lax';if(remember)c+='; Max-Age=2592000';return json({ok:true,user_info:payload.user_info},200,{'set-cookie':c})}catch(e){return json({error:e.name==='AbortError'?'Xtream server timed out.':e.message},502)}}if(p==='/api/logout'&&req.method==='POST')return json({ok:true},200,{'set-cookie':'mx_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'});const s=await session(req,env);if(p==='/api/session'){if(!s)return json({ok:false},401);return json({ok:true,server:s.server,username:s.username,user_info:s.user_info})}if(!s)return json({error:'Session expired. Please login again.'},401);if(p==='/api/action'){const a=u.searchParams.get('action')||'',allow=new Set(['get_live_categories','get_live_streams','get_vod_categories','get_vod_streams','get_series_categories','get_series','get_series_info','get_short_epg','get_simple_data_table']);if(!allow.has(a))return json({error:'Unsupported action'},400);const params={};for(const k of ['category_id','series_id','stream_id','epg_limit']){const v=u.searchParams.get(k);if(v!==null&&v!=='')params[k]=v}try{return json(await getj(apiurl(s,a,params)))}catch(e){return json({error:e.message},502)}}if(p==='/api/probe-live'){
     const id=u.searchParams.get('id')||'';
     if(!/^\d+$/.test(id))return json({error:'Invalid stream id'},400);
     const base=clean(s.server)+'/live/'+encodeURIComponent(s.username)+'/'+encodeURIComponent(s.password)+'/'+id;
