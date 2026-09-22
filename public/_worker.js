@@ -27,7 +27,7 @@ async function boot(){refreshHistory();try{const s=await req('/api/session');if(
 
 function b64u(bytes){let s='';for(const b of bytes)s+=String.fromCharCode(b);return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}
 function unb64u(s){s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';const b=atob(s);return Uint8Array.from(b,c=>c.charCodeAt(0))}
-async function hkey(env){return crypto.subtle.importKey('raw',enc.encode(env.COOKIE_SIGNING_KEY),{name:'HMAC',hash:'SHA-256'},false,['sign','verify'])}
+async function hkey(env){const secret=env&&env.COOKIE_SIGNING_KEY;if(!secret)throw Error('MX TV setup incomplete: add the Cloudflare secret COOKIE_SIGNING_KEY, then redeploy.');return crypto.subtle.importKey('raw',enc.encode(secret),{name:'HMAC',hash:'SHA-256'},false,['sign','verify'])}
 async function sign(env,s){return b64u(new Uint8Array(await crypto.subtle.sign('HMAC',await hkey(env),enc.encode(s))))}
 async function verify(env,s,sig){try{return crypto.subtle.verify('HMAC',await hkey(env),unb64u(sig),enc.encode(s))}catch{return false}}
 async function makeSession(env,p){const b=b64u(enc.encode(JSON.stringify(p)));return b+'.'+await sign(env,b)}
