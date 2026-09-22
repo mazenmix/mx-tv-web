@@ -234,6 +234,7 @@ async function play(x){
 
   const v=$('#video');
   let fallbackStarted=false;
+  let tsAttempt=0;
 
   const cleanup=()=>{
     if(hls){try{hls.destroy()}catch{}hls=null}
@@ -249,39 +250,98 @@ async function play(x){
   const formats=(state.src?.user_info?.allowed_output_formats||[]).map(v=>String(v).toLowerCase());
   const hasHls=formats.length===0||formats.includes('m3u8')||formats.includes('hls');
   const hasTs=formats.length===0||formats.includes('ts')||formats.includes('mpegts');
+
   const hlsUrl=x.streamId?('/live/'+x.streamId+'.m3u8?force=hls'):x.url;
   const tsUrl=x.streamId?('/live/'+x.streamId+'.ts?force=ts'):x.url;
+  const hlsAsTsUrl=x.streamId?('/live/'+x.streamId+'.m3u8?force=ts'):x.url;
   const nativeHls=!!v.canPlayType('application/vnd.apple.mpegurl');
 
+  const humanErr=(type,detail,info)=>{
+    const msg=info?.msg||info?.message||info?.reason||info?.code||'';
+    return [type,detail,msg].filter(Boolean).map(String).join(' · ').slice(0,180)
+  };
+
+  const tryNativeTs=(url,lastError)=>{
+    if(mpegPlayer){try{mpegPlayer.destroy()}catch{}mpegPlayer=null}
+    v.onerror=()=>{};
+    try{v.pause()}catch{}
+    v.removeAttribute('src');
+    try{v.load()}catch{}
+    v.src=url;
+    $('#pinfo').textContent=(x.cat||'')+' · native TS fallback';
+    v.play().catch(()=>{
+      const detail=lastError||'unknown TS error';
+      $('#pinfo').textContent=(x.cat||'')+' · '+detail;
+      toast('TS playback failed · '+detail)
+    })
+  };
+
   const startTs=()=>{
-    if(fallbackStarted)return;
+    if(fallbackStarted&&tsAttempt>=2)return;
     fallbackStarted=true;
+
     if(hls){try{hls.destroy()}catch{}hls=null}
+    if(mpegPlayer){try{mpegPlayer.destroy()}catch{}mpegPlayer=null}
     v.onerror=null;
     try{v.pause()}catch{}
     v.removeAttribute('src');
     try{v.load()}catch{}
 
+    const candidates=[tsUrl,hlsAsTsUrl];
+    const url=candidates[Math.min(tsAttempt,candidates.length-1)];
+    tsAttempt++;
+    $('#pinfo').textContent=(x.cat||'')+' · TS fallback '+tsAttempt;
+
     setTimeout(()=>{
-      $('#pinfo').textContent=(x.cat||'')+' · TS fallback';
       if(window.mpegts&&mpegts.isSupported()){
         try{
           mpegPlayer=mpegts.createPlayer(
-            {type:'mpegts',isLive:true,url:tsUrl},
-            {enableWorker:true,enableStashBuffer:false,stashInitialSize:128,lazyLoad:false}
+            {type:'mpegts',isLive:true,url},
+            {
+              enableWorker:false,
+              enableStashBuffer:false,
+              stashInitialSize:64,
+              lazyLoad:false,
+              autoCleanupSourceBuffer:true,
+              autoCleanupMaxBackwardDuration:12,
+              autoCleanupMinBackwardDuration:6
+            }
           );
           mpegPlayer.attachMediaElement(v);
           mpegPlayer.load();
-          mpegPlayer.on(mpegts.Events.ERROR,(type,detail)=>{
-            toast('TS playback failed · '+String(detail||type||'unknown'));
+
+          mpegPlayer.on(mpegts.Events.ERROR,(errorType,errorDetail,errorInfo)=>{
+            const detail=humanErr(errorType,errorDetail,errorInfo);
+            try{mpegPlayer.destroy()}catch{}mpegPlayer=null;
+
+            if(tsAttempt<2){
+              toast('TS mode '+tsAttempt+' failed — trying alternate Xtream output…');
+              setTimeout(startTs,700);
+            }else{
+              const lower=detail.toLowerCase();
+              if(lower.includes('hevc')||lower.includes('h265')||lower.includes('h.265')){
+                $('#pinfo').textContent=(x.cat||'')+' · HEVC/H.265 browser decode unsupported';
+                toast('Channel uses HEVC/H.265 that this browser player cannot decode.')
+              }else{
+                tryNativeTs(url,detail||'exception')
+              }
+            }
           });
-          mpegPlayer.play().catch(()=>{});
+
+          mpegPlayer.play().catch(e=>{
+            const detail=e?.message||String(e||'play rejected');
+            if(tsAttempt<2)setTimeout(startTs,700);
+            else tryNativeTs(url,detail)
+          });
           return
-        }catch(e){}
+        }catch(e){
+          const detail=e?.message||String(e||'mpegts exception');
+          if(tsAttempt<2)setTimeout(startTs,700);
+          else tryNativeTs(url,detail)
+        }
       }
-      v.src=tsUrl;
-      v.play().catch(()=>toast('TS stream is not supported by this browser/device.'))
-    },900)
+      tryNativeTs(url,'mpegts.js is not supported')
+    },700)
   };
 
   const startHls=()=>{
@@ -292,12 +352,25 @@ async function play(x){
       v.play().catch(()=>{});
       return
     }
+
     if(window.Hls&&Hls.isSupported()){
-      hls=new Hls({enableWorker:true,lowLatencyMode:false,maxBufferLength:20,backBufferLength:10});
+      hls=new Hls({
+        enableWorker:true,
+        lowLatencyMode:false,
+        maxBufferLength:20,
+        backBufferLength:10
+      });
       hls.on(Hls.Events.ERROR,(ev,data)=>{
         if(data.fatal){
-          if(hasTs)startTs();
-          else toast('HLS stream failed · '+String(data.details||data.type||'unknown'));
+          const detail=String(data.details||data.type||'HLS error');
+          try{hls.destroy()}catch{}hls=null;
+          if(hasTs){
+            toast('HLS failed · '+detail+' — trying TS…');
+            setTimeout(startTs,500)
+          }else{
+            $('#pinfo').textContent=(x.cat||'')+' · '+detail;
+            toast('HLS stream failed · '+detail)
+          }
         }
       });
       hls.loadSource(hlsUrl);
@@ -305,6 +378,7 @@ async function play(x){
       hls.on(Hls.Events.MANIFEST_PARSED,()=>v.play().catch(()=>{}));
       return
     }
+
     if(hasTs)startTs();
     else toast('HLS is not supported by this browser.')
   };
